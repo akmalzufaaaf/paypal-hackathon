@@ -345,6 +345,34 @@ describe("PayPalError", () => {
     expect(paypalErr.status).toBe(422);
   });
 
+  it("wraps a network failure on the token request as PayPalError NETWORK_ERROR", async () => {
+    stubFetch(() => {
+      throw new TypeError("fetch failed");
+    });
+    const { createOrder, PayPalError } = await loadClient();
+    const err = await createOrder(20000, "m1", "req-1").catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(PayPalError);
+    const paypalErr = err as InstanceType<typeof PayPalError>;
+    expect(paypalErr.name).toBe("NETWORK_ERROR");
+    expect(paypalErr.status).toBe(0);
+    expect(paypalErr.message).toBe("PayPal request failed: fetch failed");
+  });
+
+  it("wraps a network failure on an API call as PayPalError NETWORK_ERROR", async () => {
+    stubFetch((call) => {
+      if (call.url.endsWith("/v1/oauth2/token")) return jsonResponse(200, TOKEN);
+      throw new TypeError("fetch failed: socket hang up");
+    });
+    const { createOrder, PayPalError } = await loadClient();
+    const err = await createOrder(20000, "m1", "req-1").catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(PayPalError);
+    const paypalErr = err as InstanceType<typeof PayPalError>;
+    expect(paypalErr.name).toBe("NETWORK_ERROR");
+    expect(paypalErr.status).toBe(0);
+    expect(paypalErr.message).toContain("PayPal request failed:");
+    expect(paypalErr.message).toContain("socket hang up");
+  });
+
   it("throws PayPalError when the token request fails", async () => {
     stubFetch((call) => {
       if (call.url.endsWith("/v1/oauth2/token")) {

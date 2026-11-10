@@ -23,6 +23,18 @@ describe("mapError", () => {
     });
   });
 
+  it("maps a PayPal NETWORK_ERROR to 502 with the readable cause", () => {
+    const err = new PayPalError(
+      "NETWORK_ERROR",
+      "PayPal request failed: fetch failed",
+      0,
+    );
+    expect(mapError(err)).toEqual({
+      status: 502,
+      error: "PayPal request failed: fetch failed",
+    });
+  });
+
   it("maps workflow state/validation errors to 400", () => {
     expect(mapError(new InvalidTransitionError("bad transition")).status).toBe(400);
     expect(mapError(new PolicyBlocked("over cap")).status).toBe(400);

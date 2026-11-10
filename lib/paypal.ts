@@ -63,6 +63,26 @@ function toPayPalError(status: number, data: unknown, rawText: string): PayPalEr
   );
 }
 
+/**
+ * Network-level failures (DNS, timeout, connection reset) reject `fetch`
+ * with a TypeError, not a PayPal response. Wrap them as PayPalError so
+ * callers can map every PayPal failure uniformly (API routes: 502).
+ */
+async function fetchOrNetworkError(
+  ...args: Parameters<typeof fetch>
+): Promise<Response> {
+  try {
+    return await fetch(...args);
+  } catch (err) {
+    const cause = err instanceof Error ? err.message : String(err);
+    throw new PayPalError(
+      "NETWORK_ERROR",
+      `PayPal request failed: ${cause}`,
+      0,
+    );
+  }
+}
+
 async function parseBody(res: Response): Promise<{ data: unknown; text: string }> {
   const text = await res.text();
   if (!text) return { data: null, text };
@@ -95,7 +115,7 @@ async function getAccessToken(): Promise<string> {
   }
 
   const basic = Buffer.from(`${clientId}:${clientSecret}`).toString("base64");
-  const res = await fetch(`${base}/v1/oauth2/token`, {
+  const res = await fetchOrNetworkError(`${base}/v1/oauth2/token`, {
     method: "POST",
     headers: {
       Authorization: `Basic ${basic}`,
@@ -147,7 +167,7 @@ async function paypalFetch(
   };
   if (requestId) headers["PayPal-Request-Id"] = requestId;
 
-  const res = await fetch(`${apiBase()}${path}`, {
+  const res = await fetchOrNetworkError(`${apiBase()}${path}`, {
     method: options.method ?? "GET",
     headers,
     body: options.body === undefined ? undefined : JSON.stringify(options.body),
