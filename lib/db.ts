@@ -77,7 +77,7 @@ CREATE TABLE IF NOT EXISTS agent_events (
 let cached: { key: string; db: Database.Database } | null = null;
 
 export function getDb(): Database.Database {
-  const rawPath = process.env.RILIS_DB_PATH ?? "./data/rilis.db";
+  const rawPath = process.env.RILIS_DB_PATH?.trim() || "./data/rilis.db";
   const isMemory = rawPath === ":memory:";
   const key = isMemory ? ":memory:" : path.resolve(rawPath);
 

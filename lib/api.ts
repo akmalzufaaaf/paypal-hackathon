@@ -68,6 +68,10 @@ export function mapError(err: unknown): { status: number; error: string } {
 
 export function errorResponse(err: unknown): NextResponse {
   const { status, error } = mapError(err);
+  if (status >= 500) {
+    // Server-side only: the client still gets the generic message.
+    console.error("[api] request failed:", err);
+  }
   return NextResponse.json({ ok: false, error }, { status });
 }
 

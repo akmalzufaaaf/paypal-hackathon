@@ -38,7 +38,8 @@ type PayPalErrorBody = {
 };
 
 function apiBase(): string {
-  return (process.env.PAYPAL_API_BASE ?? DEFAULT_API_BASE).replace(/\/$/, "");
+  const base = process.env.PAYPAL_API_BASE?.trim() || DEFAULT_API_BASE;
+  return base.replace(/\/$/, "");
 }
 
 function toPayPalError(status: number, data: unknown, rawText: string): PayPalError {
