@@ -1,0 +1,27 @@
+# Rilis — Render Blueprint (one Node web service)
+# Create the service from this file in the owner's Render account
+# (Render Dashboard -> New -> Blueprint, or `render blueprint launch`).
+# All secrets are entered in the Render dashboard (sync: false = not in repo).
+# See docs/submission/owner-actions.md for the step-by-step owner checklist.
+services:
+  - type: web
+    name: rilis
+    runtime: node
+    buildCommand: npm install && npm run build
+    startCommand: npm start
+    healthCheckPath: /
+    envVars:
+      - key: PAYPAL_CLIENT_ID
+        sync: false
+      - key: PAYPAL_CLIENT_SECRET
+        sync: false
+      - key: NEXT_PUBLIC_PAYPAL_CLIENT_ID
+        sync: false
+      - key: PAYPAL_ENV
+        sync: false
+      - key: AI_API_KEY
+        sync: false
+      - key: AI_BASE_URL
+        sync: false
+      - key: AI_MODEL
+        sync: false
