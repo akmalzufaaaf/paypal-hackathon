@@ -64,9 +64,10 @@ this: an agent that transacts, not one that only recommends.
 
 - **Time:** ~2 days of build (Nov 10–12). Every choice below prefers a
   boring, already-known tool over a new one.
-- **PayPal sandbox:** app credentials come from a sandbox Business
-  account; the demo payer logs in with a sandbox Personal (buyer)
-  account in the PayPal approval popup. Test credentials (buyer login,
+- **PayPal sandbox (owner-confirmed 2026-11-10):** the owner will
+  create/provide the sandbox Business app credentials and a sandbox
+  Personal (buyer) account today; the demo payer logs in with that
+  buyer account in the PayPal approval popup. Test credentials (buyer login,
   no secrets that spend real money) must be documented for judges in
   the README/Devpost testing instructions. Client secret stays
   server-side in env vars, never committed.
@@ -213,8 +214,13 @@ raises the cap (a logged policy edit) or voids the authorization.
       score: 0-100, summary }`.
    `score` = weighted pass ratio defined in code from item verdicts,
    not a free-form LLM number.
-4. **Provider strategy:** if `AI_API_KEY` (OpenAI-compatible endpoint)
-   is set, use it; otherwise a deterministic fallback verifier runs
+4. **Provider strategy (owner-confirmed 2026-11-10):** the owner will
+   provide an API key for a Meta model (Muse Wonder or Muse Spark) for
+   the hosted demo. The verifier therefore sits behind a provider
+   interface configured by `AI_API_KEY` / `AI_BASE_URL` / `AI_MODEL`
+   (OpenAI-compatible request shape where the provider supports it; a
+   thin Meta adapter behind the same interface if it does not). If no
+   key is configured, a deterministic fallback verifier runs
    (checklist keyword/evidence matching over the delivery note and
    extracted text). The fallback is disclosed in README/Devpost text
    ("runs key-free for judges; plug in any OpenAI-compatible key for
@@ -331,6 +337,15 @@ Money is integer cents everywhere; display formats from cents.
 | Double capture from retries/double-clicks | Server state machine + idempotency keys + terminal-state guards |
 | Judges mistake ledger for real payout | "Simulated payout" labelling in UI, README disclosure table, and video narration |
 | Scope creep (auth, webhooks, Payouts) | Non-goals are explicit; optional Payouts spike is time-boxed to 2h and behind the same UI |
+
+## Ownership (owner-confirmed 2026-11-10)
+
+End-to-end delivery sits with the builder: application code, Render
+deployment, README/testing instructions, Devpost submission draft,
+and the demo-video script. The owner provides accounts and secrets
+(PayPal sandbox, Meta AI key, Render, GitHub), reviews, records and
+uploads the video, and performs the final Devpost submission from
+their own accounts.
 
 ## Builder's calls (settled by the builder, flagged for review)
 
