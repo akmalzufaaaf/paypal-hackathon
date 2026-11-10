@@ -7,6 +7,14 @@
  * (even a client approval in `approveCapture` cannot breach it); policy
  * edits never re-run a decision — only `rerunPolicy` re-evaluates, and only
  * from VERIFIED/ESCALATED. Every state change is guarded by `canTransition`.
+ *
+ * Concurrency/atomicity: every public mutation runs under one per-instance
+ * async queue, so a milestone's state checks, the project budget-cap check
+ * and the following capture can never interleave with another mutation;
+ * `transitionTo` additionally re-reads the DB row and rejects stale
+ * snapshots. Once PayPal has captured, RELEASED + ledger + audit events are
+ * written in a single DB transaction — a local failure leaves the milestone
+ * CAPTURED (never re-captured, never escalated) and release can be resumed.
  */
 
 import { getDb } from "./db";
@@ -114,6 +122,20 @@ export function createWorkflow(deps: Partial<WorkflowDeps> = {}) {
   };
   const verify: VerifyFn = deps.verify ?? ((input) => verifyDeliverable(input));
 
+  // Serializes all public mutations for this workflow instance. This makes
+  // each check-then-act sequence (state guard, budget-cap re-check, capture)
+  // atomic with respect to other workflow calls, per milestone and per
+  // project — concurrent decides/approvals cannot double-capture.
+  let tail: Promise<void> = Promise.resolve();
+  function runExclusive<T>(fn: () => Promise<T>): Promise<T> {
+    const result = tail.then(fn, fn);
+    tail = result.then(
+      () => undefined,
+      () => undefined,
+    );
+    return result;
+  }
+
   function getMilestone(milestoneId: string): Milestone {
     const milestone = getState().milestones.find((m) => m.id === milestoneId);
     if (!milestone) {
@@ -136,9 +158,17 @@ export function createWorkflow(deps: Partial<WorkflowDeps> = {}) {
       paypalCaptureId?: string;
     } = {},
   ): Milestone {
-    if (!canTransition(milestone.state, to)) {
+    // Re-read the persisted row: never trust a snapshot taken before an
+    // await (verifier / PayPal), even though mutations are serialized.
+    const current = getMilestone(milestone.id);
+    if (current.state !== milestone.state) {
       throw new InvalidTransitionError(
-        `Invalid transition ${milestone.state} -> ${to} for milestone ${milestone.id}`,
+        `Stale state for milestone ${milestone.id}: expected ${milestone.state}, found ${current.state}`,
+      );
+    }
+    if (!canTransition(current.state, to)) {
+      throw new InvalidTransitionError(
+        `Invalid transition ${current.state} -> ${to} for milestone ${milestone.id}`,
       );
     }
     return updateMilestone(milestone.id, { state: to, ...patch });
@@ -161,12 +191,44 @@ export function createWorkflow(deps: Partial<WorkflowDeps> = {}) {
   }
 
   /**
+   * RELEASED + ledger + audit events as one DB transaction: either all of
+   * them persist, or the milestone stays CAPTURED with its capture ID stored
+   * and no ledger row — resumable without ever re-capturing.
+   */
+  function releaseAtomically(captured: Milestone, actor: string): void {
+    getDb().transaction(() => {
+      transitionTo(captured, "RELEASED");
+      insertLedgerRelease(captured.id, captured.amountCents);
+      insertEvent(
+        captured.id,
+        actor,
+        "captured",
+        `Captured authorization ${captured.paypalAuthorizationId} as capture ${captured.paypalCaptureId} for ${captured.amountCents} cents.`,
+      );
+      insertEvent(
+        captured.id,
+        actor,
+        "released",
+        `Released ${captured.amountCents} cents for milestone ${captured.id} (simulated payout, capture ${captured.paypalCaptureId}).`,
+      );
+    })();
+  }
+
+  /**
    * Capture the stored authorization and release the (simulated) payout.
-   * The caller owns failure handling: a PayPal throw leaves the milestone
-   * in its current review state with no ledger row.
+   * A milestone already CAPTURED (PayPal capture succeeded, local release
+   * failed earlier) is resumed release-only — PayPal is never called twice.
+   * The caller owns failure handling via `handleCaptureFailure`.
    */
   async function captureAndRelease(milestoneId: string, actor: string): Promise<void> {
     const milestone = getMilestone(milestoneId);
+    if (milestone.state === "CAPTURED") {
+      if (!milestone.paypalCaptureId) {
+        throw new Error(`milestone ${milestoneId} is CAPTURED without a capture id`);
+      }
+      releaseAtomically(milestone, actor);
+      return;
+    }
     if (!milestone.paypalAuthorizationId) {
       throw new Error(`milestone ${milestoneId} has no authorization to capture`);
     }
@@ -174,21 +236,43 @@ export function createWorkflow(deps: Partial<WorkflowDeps> = {}) {
       milestone.paypalAuthorizationId,
       `${milestoneId}:capture`,
     );
+    // Persist the capture ID first; the release that follows is transactional.
     const captured = transitionTo(milestone, "CAPTURED", { paypalCaptureId: captureId });
-    insertEvent(
-      milestoneId,
-      actor,
-      "captured",
-      `Captured authorization ${milestone.paypalAuthorizationId} as capture ${captureId} for ${milestone.amountCents} cents.`,
-    );
-    transitionTo(captured, "RELEASED");
-    insertLedgerRelease(milestoneId, milestone.amountCents);
-    insertEvent(
-      milestoneId,
-      actor,
-      "released",
-      `Released ${milestone.amountCents} cents for milestone ${milestoneId} (simulated payout, capture ${captureId}).`,
-    );
+    releaseAtomically(captured, actor);
+  }
+
+  /**
+   * Distinguish capture failure phases and always rethrow the original
+   * error: PayPal (pre-capture) failure escalates VERIFIED or leaves
+   * ESCALATED unpaid; post-capture local failure stays CAPTURED — CAPTURED
+   * has no escalation edge and must never be re-captured.
+   */
+  function handleCaptureFailure(
+    milestoneId: string,
+    actor: string,
+    context: string,
+    err: unknown,
+  ): never {
+    const current = getMilestone(milestoneId);
+    if (current.state === "CAPTURED") {
+      insertEvent(
+        milestoneId,
+        actor,
+        "capture_failed",
+        `${context}: PayPal capture ${current.paypalCaptureId} succeeded but the local release failed; milestone stays CAPTURED for release-only resume: ${errorMessage(err)}`,
+      );
+    } else {
+      if (current.state === "VERIFIED") {
+        transitionTo(current, "ESCALATED");
+      }
+      insertEvent(
+        milestoneId,
+        actor,
+        "capture_failed",
+        `${context}: capture failed; milestone stays unpaid: ${errorMessage(err)}`,
+      );
+    }
+    throw err;
   }
 
   async function fundMilestone(milestoneId: string): Promise<{ orderId: string }> {
@@ -349,20 +433,24 @@ export function createWorkflow(deps: Partial<WorkflowDeps> = {}) {
     try {
       await captureAndRelease(milestoneId, "agent");
     } catch (err) {
-      transitionTo(getMilestone(milestoneId), "ESCALATED");
-      insertEvent(
-        milestoneId,
-        "agent",
-        "capture_failed",
-        `Capture failed; milestone escalated unpaid: ${errorMessage(err)}`,
-      );
-      throw err;
+      handleCaptureFailure(milestoneId, "agent", "Auto-capture", err);
     }
     return { action: "AUTO_CAPTURE" };
   }
 
   async function approveCapture(milestoneId: string): Promise<void> {
     const milestone = getMilestone(milestoneId);
+    if (milestone.state === "CAPTURED") {
+      // Resume after a post-capture local failure: release only. The cap is
+      // not re-checked (this milestone is already counted as captured) and
+      // PayPal is never re-captured.
+      try {
+        await captureAndRelease(milestoneId, "client");
+      } catch (err) {
+        handleCaptureFailure(milestoneId, "client", "Release resume", err);
+      }
+      return;
+    }
     if (milestone.state !== "ESCALATED" || !canTransition(milestone.state, "CAPTURED")) {
       throw new InvalidTransitionError(
         `approveCapture requires ESCALATED, got ${milestone.state} for milestone ${milestoneId}`,
@@ -384,13 +472,7 @@ export function createWorkflow(deps: Partial<WorkflowDeps> = {}) {
     try {
       await captureAndRelease(milestoneId, "client");
     } catch (err) {
-      insertEvent(
-        milestoneId,
-        "client",
-        "capture_failed",
-        `Capture failed; milestone stays ESCALATED unpaid: ${errorMessage(err)}`,
-      );
-      throw err;
+      handleCaptureFailure(milestoneId, "client", "Approved capture", err);
     }
   }
 
@@ -426,10 +508,30 @@ export function createWorkflow(deps: Partial<WorkflowDeps> = {}) {
 
   async function rerunPolicy(milestoneId: string): Promise<{ action: PolicyAction }> {
     const milestone = getMilestone(milestoneId);
-    if (milestone.state !== "VERIFIED" && milestone.state !== "ESCALATED") {
+    if (
+      milestone.state !== "VERIFIED" &&
+      milestone.state !== "ESCALATED" &&
+      milestone.state !== "CAPTURED"
+    ) {
       throw new InvalidTransitionError(
         `rerunPolicy requires VERIFIED or ESCALATED, got ${milestone.state} for milestone ${milestoneId}`,
       );
+    }
+    if (milestone.state === "CAPTURED") {
+      // Resume after a post-capture local failure: release only, no policy
+      // re-evaluation and no second PayPal capture.
+      insertEvent(
+        milestoneId,
+        "client",
+        "policy_rerun",
+        `Re-run on CAPTURED milestone ${milestoneId}: resuming release of capture ${milestone.paypalCaptureId} without re-capturing.`,
+      );
+      try {
+        await captureAndRelease(milestoneId, "client");
+      } catch (err) {
+        handleCaptureFailure(milestoneId, "client", "Release resume", err);
+      }
+      return { action: "AUTO_CAPTURE" };
     }
     const verification = latestVerification(milestoneId);
     if (!verification) {
@@ -467,17 +569,7 @@ export function createWorkflow(deps: Partial<WorkflowDeps> = {}) {
     try {
       await captureAndRelease(milestoneId, "client");
     } catch (err) {
-      const current = getMilestone(milestoneId);
-      if (current.state === "VERIFIED") {
-        transitionTo(current, "ESCALATED");
-      }
-      insertEvent(
-        milestoneId,
-        "client",
-        "capture_failed",
-        `Capture failed during policy re-run; milestone stays unpaid: ${errorMessage(err)}`,
-      );
-      throw err;
+      handleCaptureFailure(milestoneId, "client", "Policy re-run capture", err);
     }
     return { action: "AUTO_CAPTURE" };
   }
@@ -524,16 +616,22 @@ export function createWorkflow(deps: Partial<WorkflowDeps> = {}) {
     );
   }
 
+  // Every public mutation is serialized: a queued call re-reads state only
+  // after the previous mutation has fully settled (PayPal + DB writes).
   return {
-    fundMilestone,
-    confirmAuthorization,
-    submitDeliverable,
-    decide,
-    approveCapture,
-    rejectVoid,
-    rerunPolicy,
-    updatePolicy,
-    resetDemoFlow,
+    fundMilestone: (milestoneId: string) =>
+      runExclusive(() => fundMilestone(milestoneId)),
+    confirmAuthorization: (milestoneId: string, orderId: string) =>
+      runExclusive(() => confirmAuthorization(milestoneId, orderId)),
+    submitDeliverable: (milestoneId: string, input: SubmitDeliverableInput) =>
+      runExclusive(() => submitDeliverable(milestoneId, input)),
+    decide: (milestoneId: string) => runExclusive(() => decide(milestoneId)),
+    approveCapture: (milestoneId: string) =>
+      runExclusive(() => approveCapture(milestoneId)),
+    rejectVoid: (milestoneId: string) => runExclusive(() => rejectVoid(milestoneId)),
+    rerunPolicy: (milestoneId: string) => runExclusive(() => rerunPolicy(milestoneId)),
+    updatePolicy: (patch: PolicyPatch) => runExclusive(() => updatePolicy(patch)),
+    resetDemoFlow: () => runExclusive(() => resetDemoFlow()),
   };
 }
 

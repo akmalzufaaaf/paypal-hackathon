@@ -4,7 +4,9 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 process.env.RILIS_DB_PATH = ":memory:";
 
 import { SAMPLE_DELIVERABLE_NOTE } from "../lib/constants";
+import { getDb } from "../lib/db";
 import {
+  capturedTotalCents,
   getState,
   insertVerification,
   resetDemo,
@@ -13,7 +15,9 @@ import {
 import type { VerifyDeliverableInput } from "../lib/verifier";
 import { createWorkflow, PolicyBlocked } from "../lib/workflow";
 
-function makeFakePayPal() {
+const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+
+function makeFakePayPal(captureDelayMs = 0) {
   let orderSeq = 0;
   let captureSeq = 0;
   const flags = {
@@ -28,6 +32,7 @@ function makeFakePayPal() {
       return { authorizationId: `AUTH-${orderId}`, status: "CREATED" };
     }),
     captureAuthorization: vi.fn(async () => {
+      if (captureDelayMs > 0) await sleep(captureDelayMs);
       if (flags.failCapture) throw new Error("paypal capture failed");
       return { captureId: `CAP-${++captureSeq}`, status: "COMPLETED" };
     }),
@@ -38,8 +43,9 @@ function makeFakePayPal() {
   return { paypal, flags };
 }
 
-function makeFakeVerify(scoreRef: { score: number }) {
+function makeFakeVerify(scoreRef: { score: number }, delayMs = 0) {
   return vi.fn(async (input: VerifyDeliverableInput) => {
+    if (delayMs > 0) await sleep(delayMs);
     const passCount = Math.round((scoreRef.score / 100) * input.checklist.length);
     return {
       provider: "fallback" as const,
@@ -73,14 +79,27 @@ function milestone(id: string) {
   return m;
 }
 
-async function driveToDelivered(milestoneId: string) {
-  const { orderId } = await wf.fundMilestone(milestoneId);
-  await wf.confirmAuthorization(milestoneId, orderId);
-  await wf.submitDeliverable(milestoneId, {
+async function driveToDelivered(
+  milestoneId: string,
+  workflow: ReturnType<typeof createWorkflow> = wf,
+) {
+  const { orderId } = await workflow.fundMilestone(milestoneId);
+  await workflow.confirmAuthorization(milestoneId, orderId);
+  await workflow.submitDeliverable(milestoneId, {
     note: SAMPLE_DELIVERABLE_NOTE,
     link: "https://example.com/deliverable",
   });
   return orderId;
+}
+
+/** Workflow whose verifier + capture are slow enough for races to interleave. */
+function makeSlowWorkflow() {
+  const slowFake = makeFakePayPal(25);
+  const slowWf = createWorkflow({
+    paypal: slowFake.paypal,
+    verify: makeFakeVerify(scoreRef, 25),
+  });
+  return { slowWf, slowFake };
 }
 
 describe("happy path auto-capture", () => {
@@ -377,5 +396,107 @@ describe("resetDemoFlow", () => {
     expect(state.milestones.map((m) => m.state)).toEqual(["DRAFT", "DRAFT"]);
     const reset = state.events.find((e) => e.action === "demo_reset");
     expect(reset?.detail).toContain("paypal void failed");
+  });
+});
+
+describe("concurrency (in-flight guard)", () => {
+  it("two concurrent decide calls capture exactly once with one ledger row", async () => {
+    const { slowWf, slowFake } = makeSlowWorkflow();
+    await driveToDelivered("milestone-1", slowWf);
+
+    const results = await Promise.allSettled([
+      slowWf.decide("milestone-1"),
+      slowWf.decide("milestone-1"),
+    ]);
+
+    expect(results.filter((r) => r.status === "fulfilled")).toHaveLength(1);
+    expect(results.filter((r) => r.status === "rejected")).toHaveLength(1);
+    expect(slowFake.paypal.captureAuthorization).toHaveBeenCalledTimes(1);
+    expect(getState().ledger).toHaveLength(1);
+    expect(getState().ledger[0].amountCents).toBe(20000);
+    expect(milestone("milestone-1").state).toBe("RELEASED");
+    expect(milestone("milestone-1").paypalCaptureId).toBe("CAP-1");
+  });
+
+  it("two concurrent approveCapture calls on one milestone capture exactly once", async () => {
+    const { slowWf, slowFake } = makeSlowWorkflow();
+    await driveToDelivered("milestone-2", slowWf);
+    await slowWf.decide("milestone-2");
+    expect(milestone("milestone-2").state).toBe("ESCALATED");
+
+    const results = await Promise.allSettled([
+      slowWf.approveCapture("milestone-2"),
+      slowWf.approveCapture("milestone-2"),
+    ]);
+
+    expect(results.filter((r) => r.status === "fulfilled")).toHaveLength(1);
+    expect(results.filter((r) => r.status === "rejected")).toHaveLength(1);
+    expect(slowFake.paypal.captureAuthorization).toHaveBeenCalledTimes(1);
+    expect(getState().ledger).toHaveLength(1);
+    expect(milestone("milestone-2").state).toBe("RELEASED");
+  });
+
+  it("concurrent approvals on different milestones cannot jointly breach the budget cap", async () => {
+    const { slowWf, slowFake } = makeSlowWorkflow();
+    await driveToDelivered("milestone-1", slowWf);
+    await driveToDelivered("milestone-2", slowWf);
+    // Both in review; each alone fits a 70000 cap, together 80000 does not.
+    updateMilestone("milestone-1", { state: "ESCALATED" });
+    updateMilestone("milestone-2", { state: "ESCALATED" });
+    await slowWf.updatePolicy({ budgetCapCents: 70000 });
+
+    const results = await Promise.allSettled([
+      slowWf.approveCapture("milestone-1"),
+      slowWf.approveCapture("milestone-2"),
+    ]);
+
+    expect(results.filter((r) => r.status === "fulfilled")).toHaveLength(1);
+    const rejected = results.find((r) => r.status === "rejected");
+    expect(rejected?.status).toBe("rejected");
+    expect(
+      (rejected as PromiseRejectedResult | undefined)?.reason,
+    ).toBeInstanceOf(PolicyBlocked);
+    expect(slowFake.paypal.captureAuthorization).toHaveBeenCalledTimes(1);
+    expect(getState().ledger).toHaveLength(1);
+    expect(capturedTotalCents(getState().project.id)).toBeLessThanOrEqual(70000);
+    expect(
+      getState()
+        .milestones.map((m) => m.state)
+        .sort(),
+    ).toEqual(["ESCALATED", "RELEASED"]);
+  });
+});
+
+describe("post-capture write failure (atomic release)", () => {
+  it("stays CAPTURED with the original error, then resumes release-only without re-capturing", async () => {
+    await driveToDelivered("milestone-1");
+    getDb().exec(
+      `CREATE TRIGGER fail_ledger_insert
+       BEFORE INSERT ON ledger_entries
+       BEGIN SELECT RAISE(ABORT, 'injected ledger failure'); END;`,
+    );
+    try {
+      // The injected ledger failure must surface verbatim — never masked
+      // by an invalid CAPTURED -> ESCALATED transition error.
+      await expect(wf.decide("milestone-1")).rejects.toThrow(
+        "injected ledger failure",
+      );
+    } finally {
+      getDb().exec("DROP TRIGGER IF EXISTS fail_ledger_insert");
+    }
+
+    const captured = milestone("milestone-1");
+    expect(captured.state).toBe("CAPTURED");
+    expect(captured.paypalCaptureId).toBe("CAP-1");
+    expect(getState().ledger).toHaveLength(0);
+    expect(fake.paypal.captureAuthorization).toHaveBeenCalledTimes(1);
+
+    // Resume from CAPTURED: release only, no second PayPal capture.
+    await wf.approveCapture("milestone-1");
+    expect(milestone("milestone-1").state).toBe("RELEASED");
+    expect(getState().ledger).toHaveLength(1);
+    expect(getState().ledger[0].amountCents).toBe(20000);
+    expect(fake.paypal.captureAuthorization).toHaveBeenCalledTimes(1);
+    expect(getState().events.map((e) => e.action)).toContain("released");
   });
 });
