@@ -110,8 +110,12 @@ test-buyer login below. Do not submit with the placeholders still in place.
 5. **Agent refuses:** Reset, then fund + deliver Milestone 2 ($600). It
    escalates (over the $250 auto-pay limit). As Client, **Reject & void** —
    the authorization is voided live.
-6. Local run instead: `npm install && npm run dev`, then follow the manual
-   E2E checklist in the README (with and without `AI_API_KEY`).
+6. Local run instead: `npm install && npm run dev` (Node.js 22+), then
+   follow the manual E2E checklist in the README (with and without
+   `AI_API_KEY`). Windows without Visual Studio's "Desktop development
+   with C++" workload: use `npm install --ignore-scripts` instead — the
+   `better-sqlite3` package bundles a Windows prebuild, so the app and
+   tests run unchanged.
 
 Note: the hosted demo is one shared seeded project; simultaneous judges
 share state. Use **Reset demo** to start over. The video carries the full

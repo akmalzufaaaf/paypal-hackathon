@@ -77,7 +77,7 @@ simultaneous judges share state.
 
 ## Local run
 
-Requirements: Node.js 20+ and npm.
+Requirements: Node.js 22+ (the `better-sqlite3` dependency requires it) and npm.
 
 ```bash
 npm install
@@ -88,8 +88,10 @@ npm run dev
 > dependency from source and needs Visual Studio's "Desktop development
 > with C++" workload. Without it, use `npm install --ignore-scripts`
 > instead — the published package bundles a Windows prebuild, so the app
-> and tests run unchanged (verified in the fresh-clone check; see
-> `docs/submission/owner-actions.md` for the deployment-side equivalent).
+> and tests run unchanged (verified in the fresh-clone check).
+> Deployment-side: `docs/submission/owner-actions.md` step (c) has the
+> Render build-log check for this dependency and the decision path if
+> the native build fails there.
 
 Open http://localhost:3000. Without any env vars the app still loads with the
 seeded project; funding stays disabled until the PayPal variables below are

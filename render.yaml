@@ -11,6 +11,13 @@ services:
     startCommand: npm start
     healthCheckPath: /
     envVars:
+      # Pin the runtime: better-sqlite3 13 requires Node >=22 (its package
+      # engines) and ships N-API prebuilds (ABI-stable across Node >=22).
+      # 24 matches the locally verified runtime; this does NOT prove the
+      # Render build — see docs/submission/owner-actions.md step (c) for
+      # the build-log check and the decision path if the native build fails.
+      - key: NODE_VERSION
+        value: "24"
       - key: PAYPAL_CLIENT_ID
         sync: false
       - key: PAYPAL_CLIENT_SECRET

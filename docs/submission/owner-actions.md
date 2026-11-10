@@ -54,8 +54,8 @@ Have these ready (from step (a) and your AI provider). Names only live in
 | `PAYPAL_CLIENT_SECRET` | Sandbox Business app Secret |
 | `NEXT_PUBLIC_PAYPAL_CLIENT_ID` | Same value as `PAYPAL_CLIENT_ID` |
 | `PAYPAL_ENV` | `sandbox` |
-| `AI_API_KEY` | Your Meta AI (Muse Wonder / Muse Spark) API key — or leave unset for the fallback verifier |
-| `AI_BASE_URL` | OpenAI-compatible base URL for that key (client POSTs to `{AI_BASE_URL}/chat/completions`) |
+| `AI_API_KEY` | API key for your chosen OpenAI-compatible provider — or leave all three AI vars unset for the fallback verifier. (The owner's planned example is a Meta Muse key, but any OpenAI-compatible provider works; no specific provider is required.) |
+| `AI_BASE_URL` | That provider's OpenAI-compatible base URL (client POSTs to `{AI_BASE_URL}/chat/completions`) |
 | `AI_MODEL` | Model name for that endpoint |
 
 Optional: `PAYPAL_API_BASE` (defaults to the sandbox API base) and
@@ -72,7 +72,43 @@ Optional: `PAYPAL_API_BASE` (defaults to the sandbox API base) and
 3. In the service's **Environment** tab, set every variable from step (b)
    (they are `sync: false` in `render.yaml`, i.e. entered by you, never
    committed).
-4. Deploy. Confirm the build is green and the service URL opens.
+4. Deploy, then **check the Render build log specifically for the native
+   `better-sqlite3` build** — a green overall deploy is not enough:
+   - In the build log, find the `better-sqlite3` install step (npm runs
+     `node-gyp rebuild` for it). Success = that step completes without a
+     `gyp ERR!` / compiler error, and the runtime log shows the app
+     answering requests.
+   - Confirm the running Node version in the log is 24 (`render.yaml`
+     pins `NODE_VERSION: "24"`; better-sqlite3 13 requires Node >=22 and
+     ships N-API prebuilds, and 24 is the locally verified runtime). If
+     the log shows a different major, fix the env var before trusting
+     the deploy. This pin is a reproducibility choice, **not** proof
+     the Render build works — only this log check proves it.
+   - **If the `better-sqlite3` native build fails in the Render log,**
+     use this decision path, in order:
+     1. Read the exact `gyp ERR!` lines. If it is a missing compiler/
+        toolchain error, explicitly approve switching this service's
+        build command (Render Dashboard → Settings → Build Command,
+        overriding `render.yaml`) to
+        `npm install --ignore-scripts && npm run build`, and record
+        that approval + the date in step (f)'s submission notes. This
+        variant is only acceptable because better-sqlite3 13 bundles a
+        Linux x64 N-API prebuild (`prebuilds/linux-x64.node` in the
+        published package, loaded directly by the package — the same
+        mechanism verified locally on Windows with
+        `npm install --ignore-scripts`, 117/117 tests green). It is
+        **not** proven for Render's Linux image until step 2 passes.
+     2. After redeploying with whichever build command, prove the
+        bundled binary actually loads on Render: open the hosted URL,
+        click **Reset demo**, and confirm the seeded project loads with
+        both milestones (that path reads/writes SQLite). A 500 on
+        `/api/state` or a `better-sqlite3` load error in the runtime
+        log means the binary did not load — do not submit; revert to
+        the compiling build command and fix the toolchain/Node-version
+        issue first.
+     3. Whichever path succeeded, note the working build command in
+        your submission notes so the frozen hosted service can be
+        reproduced.
 5. Paste the hosted URL into `README.md` ("Hosted demo") and into
    `docs/submission/devpost-draft.md` ("Hosted demo URL"), and commit
    **before** submitting — after the Devpost submission the repo is
