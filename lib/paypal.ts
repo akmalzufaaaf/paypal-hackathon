@@ -117,6 +117,7 @@ async function getAccessToken(): Promise<string> {
   const basic = Buffer.from(`${clientId}:${clientSecret}`).toString("base64");
   const res = await fetchOrNetworkError(`${base}/v1/oauth2/token`, {
     method: "POST",
+    signal: AbortSignal.timeout(30000),
     headers: {
       Authorization: `Basic ${basic}`,
       "Content-Type": "application/x-www-form-urlencoded",
@@ -169,6 +170,7 @@ async function paypalFetch(
 
   const res = await fetchOrNetworkError(`${apiBase()}${path}`, {
     method: options.method ?? "GET",
+    signal: AbortSignal.timeout(30000),
     headers,
     body: options.body === undefined ? undefined : JSON.stringify(options.body),
   });

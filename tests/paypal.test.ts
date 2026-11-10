@@ -5,6 +5,7 @@ type RecordedCall = {
   method: string;
   headers: Record<string, string>;
   body: string | undefined;
+  signal: unknown;
 };
 
 type Handler = (call: RecordedCall) => unknown;
@@ -59,6 +60,7 @@ function stubFetch(handler: Handler = defaultHandler) {
       method: init?.method ?? "GET",
       headers: (init?.headers ?? {}) as Record<string, string>,
       body: typeof init?.body === "string" ? init.body : undefined,
+      signal: init?.signal,
     };
     calls.push(call);
     return handler(call);
@@ -371,6 +373,26 @@ describe("PayPalError", () => {
     expect(paypalErr.status).toBe(0);
     expect(paypalErr.message).toContain("PayPal request failed:");
     expect(paypalErr.message).toContain("socket hang up");
+  });
+
+  it("maps a fetch timeout/abort to PayPalError NETWORK_ERROR and passes abort signals", async () => {
+    stubFetch((call) => {
+      if (call.url.endsWith("/v1/oauth2/token")) return jsonResponse(200, TOKEN);
+      throw new DOMException(
+        "The operation was aborted due to timeout",
+        "TimeoutError",
+      );
+    });
+    const { createOrder, PayPalError } = await loadClient();
+    const err = await createOrder(20000, "m1", "req-1").catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(PayPalError);
+    const paypalErr = err as InstanceType<typeof PayPalError>;
+    expect(paypalErr.name).toBe("NETWORK_ERROR");
+    expect(paypalErr.status).toBe(0);
+    expect(calls.length).toBeGreaterThanOrEqual(2);
+    for (const call of calls) {
+      expect(call.signal).toBeInstanceOf(AbortSignal);
+    }
   });
 
   it("throws PayPalError when the token request fails", async () => {

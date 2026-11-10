@@ -24,6 +24,7 @@ export interface Milestone {
   paypalAuthorizationId: string | null;
   paypalCaptureId: string | null;
   authorizationExpiresAt: string | null;
+  fundingAttemptId: string | null;
 }
 
 export interface Deliverable {

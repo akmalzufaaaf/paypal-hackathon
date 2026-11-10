@@ -97,6 +97,7 @@ export async function chatJson(prompt: string): Promise<unknown> {
   try {
     res = await fetch(url, {
       method: "POST",
+      signal: AbortSignal.timeout(30000),
       headers: {
         Authorization: `Bearer ${apiKey}`,
         "Content-Type": "application/json",

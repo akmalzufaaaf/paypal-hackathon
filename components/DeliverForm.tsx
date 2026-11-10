@@ -2,7 +2,10 @@
 
 import { useState } from "react";
 
-import { SAMPLE_DELIVERABLE_NOTE } from "@/lib/constants";
+import {
+  MILESTONE2_SAMPLE_DELIVERABLE_NOTE,
+  SAMPLE_DELIVERABLE_NOTE,
+} from "@/lib/constants";
 import type { Milestone, Role } from "./demo-client";
 
 export interface DeliverPayload {
@@ -20,6 +23,7 @@ interface DeliverFormProps {
 }
 
 const SAMPLE_LINK = "https://example.com/sample-deliverable/primary-logo-concepts";
+const SAMPLE_LINK_M2 = "https://example.com/sample-deliverable/full-brand-kit";
 
 export default function DeliverForm({
   milestone,
@@ -41,8 +45,13 @@ export default function DeliverForm({
     Boolean(note.trim() || link.trim() || extractedText.trim());
 
   function useSample() {
-    setNote(SAMPLE_DELIVERABLE_NOTE);
-    setLink(SAMPLE_LINK);
+    // Seeded milestone IDs are stable, so select the sample by ID: the
+    // Milestone-1 note scores 60 against the Milestone-2 checklist.
+    const isBrandKit = milestone.id === "milestone-2";
+    setNote(
+      isBrandKit ? MILESTONE2_SAMPLE_DELIVERABLE_NOTE : SAMPLE_DELIVERABLE_NOTE,
+    );
+    setLink(isBrandKit ? SAMPLE_LINK_M2 : SAMPLE_LINK);
     setFormError(null);
   }
 

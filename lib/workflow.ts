@@ -17,6 +17,8 @@
  * CAPTURED (never re-captured, never escalated) and release can be resumed.
  */
 
+import { randomUUID } from "node:crypto";
+
 import { getDb } from "./db";
 import {
   authorizeOrder,
@@ -232,10 +234,15 @@ export function createWorkflow(deps: Partial<WorkflowDeps> = {}) {
     if (!milestone.paypalAuthorizationId) {
       throw new Error(`milestone ${milestoneId} has no authorization to capture`);
     }
-    const { captureId } = await paypal.captureAuthorization(
+    const { captureId, status } = await paypal.captureAuthorization(
       milestone.paypalAuthorizationId,
-      `${milestoneId}:capture`,
+      `${milestone.paypalAuthorizationId}:capture`,
     );
+    if (status !== "COMPLETED") {
+      throw new Error(
+        `PayPal capture returned unexpected status ${status} for authorization ${milestone.paypalAuthorizationId}; expected COMPLETED`,
+      );
+    }
     // Persist the capture ID first; the release that follows is transactional.
     const captured = transitionTo(milestone, "CAPTURED", { paypalCaptureId: captureId });
     releaseAtomically(captured, actor);
@@ -286,12 +293,21 @@ export function createWorkflow(deps: Partial<WorkflowDeps> = {}) {
     if (milestone.paypalOrderId) {
       return { orderId: milestone.paypalOrderId };
     }
+    // One attempt ID per funding attempt, persisted BEFORE the PayPal call:
+    // a retry of this attempt reuses it (PayPal replays the same request),
+    // while a reseeded milestone starts with none and gets a fresh one —
+    // a forever-static key would replay the pre-Reset order after Reset.
+    const attemptId = milestone.fundingAttemptId ?? randomUUID();
+    if (!milestone.fundingAttemptId) {
+      updateMilestone(milestoneId, { fundingAttemptId: attemptId });
+    }
+    const requestId = `${milestoneId}:create-order:${attemptId}`;
     let orderId: string;
     try {
       ({ orderId } = await paypal.createOrder(
         milestone.amountCents,
         milestoneId,
-        `${milestoneId}:create-order`,
+        requestId,
       ));
     } catch (err) {
       insertEvent(
@@ -307,7 +323,7 @@ export function createWorkflow(deps: Partial<WorkflowDeps> = {}) {
       milestoneId,
       "client",
       "order_created",
-      `Created PayPal order ${orderId} for ${milestone.amountCents} cents (request ${milestoneId}:create-order).`,
+      `Created PayPal order ${orderId} for ${milestone.amountCents} cents (request ${requestId}).`,
     );
     return { orderId };
   }
@@ -319,11 +335,21 @@ export function createWorkflow(deps: Partial<WorkflowDeps> = {}) {
         `Invalid transition ${milestone.state} -> AUTHORIZED for milestone ${milestoneId}`,
       );
     }
+    if (milestone.paypalOrderId && milestone.paypalOrderId !== orderId) {
+      throw new InvalidTransitionError(
+        `order ${orderId} does not match the stored order ${milestone.paypalOrderId} for milestone ${milestoneId}`,
+      );
+    }
     let authorizationId: string;
     try {
       const result = await paypal.authorizeOrder(orderId);
       if (!result.authorizationId) {
         throw new Error("PayPal authorize response had no authorization id");
+      }
+      if (result.status !== "CREATED") {
+        throw new Error(
+          `PayPal authorize returned unexpected status ${result.status} for order ${orderId}; expected CREATED`,
+        );
       }
       authorizationId = result.authorizationId;
     } catch (err) {

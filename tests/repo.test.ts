@@ -65,6 +65,7 @@ describe("seed", () => {
       expect(m.paypalAuthorizationId).toBeNull();
       expect(m.paypalCaptureId).toBeNull();
       expect(m.authorizationExpiresAt).toBeNull();
+      expect(m.fundingAttemptId).toBeNull();
     }
   });
 });
@@ -139,6 +140,15 @@ describe("repository writes", () => {
     const reread = getState().milestones[0];
     expect(reread.state).toBe("AUTHORIZED");
     expect(reread.paypalAuthorizationId).toBe("AUTH-1");
+  });
+
+  it("updateMilestone persists fundingAttemptId through the patch surface", () => {
+    const { milestones } = getState();
+    const updated = updateMilestone(milestones[0].id, {
+      fundingAttemptId: "attempt-123",
+    });
+    expect(updated.fundingAttemptId).toBe("attempt-123");
+    expect(getState().milestones[0].fundingAttemptId).toBe("attempt-123");
   });
 
   it("insertDeliverable round-trips through getState", () => {

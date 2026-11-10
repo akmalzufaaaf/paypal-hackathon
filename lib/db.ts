@@ -34,7 +34,8 @@ CREATE TABLE IF NOT EXISTS milestones (
   paypal_order_id TEXT,
   paypal_authorization_id TEXT,
   paypal_capture_id TEXT,
-  authorization_expires_at TEXT
+  authorization_expires_at TEXT,
+  funding_attempt_id TEXT
 );
 CREATE TABLE IF NOT EXISTS deliverables (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -94,9 +95,20 @@ export function getDb(): Database.Database {
   const db = new Database(key);
   db.pragma("foreign_keys = ON");
   db.exec(SCHEMA);
+  ensureFundingAttemptColumn(db);
   seedIfEmpty(db);
   cached = { key, db };
   return db;
+}
+
+/** Add funding_attempt_id to DBs created before the column existed. */
+function ensureFundingAttemptColumn(db: Database.Database): void {
+  const columns = db.prepare("PRAGMA table_info(milestones)").all() as Array<{
+    name: string;
+  }>;
+  if (!columns.some((c) => c.name === "funding_attempt_id")) {
+    db.exec("ALTER TABLE milestones ADD COLUMN funding_attempt_id TEXT");
+  }
 }
 
 /** Insert the demo project + milestones if the projects table is empty. */

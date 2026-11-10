@@ -23,6 +23,7 @@ export interface Milestone {
   paypalAuthorizationId: string | null;
   paypalCaptureId: string | null;
   authorizationExpiresAt: string | null;
+  fundingAttemptId: string | null;
 }
 
 export interface Deliverable {
@@ -95,6 +96,7 @@ type MilestoneRow = {
   paypal_authorization_id: string | null;
   paypal_capture_id: string | null;
   authorization_expires_at: string | null;
+  funding_attempt_id: string | null;
 };
 
 type DeliverableRow = {
@@ -161,6 +163,7 @@ function toMilestone(row: MilestoneRow): Milestone {
     paypalAuthorizationId: row.paypal_authorization_id,
     paypalCaptureId: row.paypal_capture_id,
     authorizationExpiresAt: row.authorization_expires_at,
+    fundingAttemptId: row.funding_attempt_id,
   };
 }
 
@@ -212,7 +215,7 @@ function toAgentEvent(row: EventRow): AgentEvent {
 }
 
 const MILESTONE_COLUMNS =
-  "id, project_id, title, brief, checklist_json, amount_cents, state, paypal_order_id, paypal_authorization_id, paypal_capture_id, authorization_expires_at";
+  "id, project_id, title, brief, checklist_json, amount_cents, state, paypal_order_id, paypal_authorization_id, paypal_capture_id, authorization_expires_at, funding_attempt_id";
 
 function getMilestoneRow(id: string): Milestone {
   const row = getDb()
@@ -267,6 +270,7 @@ export interface MilestonePatch {
   paypalAuthorizationId?: string | null;
   paypalCaptureId?: string | null;
   authorizationExpiresAt?: string | null;
+  fundingAttemptId?: string | null;
 }
 
 const PATCH_COLUMNS: Record<keyof MilestonePatch, string> = {
@@ -275,6 +279,7 @@ const PATCH_COLUMNS: Record<keyof MilestonePatch, string> = {
   paypalAuthorizationId: "paypal_authorization_id",
   paypalCaptureId: "paypal_capture_id",
   authorizationExpiresAt: "authorization_expires_at",
+  fundingAttemptId: "funding_attempt_id",
 };
 
 export function updateMilestone(id: string, patch: MilestonePatch): Milestone {

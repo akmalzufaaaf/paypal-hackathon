@@ -13,7 +13,11 @@ import {
   updateMilestone,
 } from "../lib/repo";
 import type { VerifyDeliverableInput } from "../lib/verifier";
-import { createWorkflow, PolicyBlocked } from "../lib/workflow";
+import {
+  createWorkflow,
+  InvalidTransitionError,
+  PolicyBlocked,
+} from "../lib/workflow";
 
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
@@ -24,23 +28,28 @@ function makeFakePayPal(captureDelayMs = 0) {
     failAuthorize: false,
     failCapture: false,
     failVoid: false,
+    failCreate: false,
   };
+  const statuses = { authorize: "CREATED", capture: "COMPLETED" };
   const paypal = {
-    createOrder: vi.fn(async () => ({ orderId: `ORDER-${++orderSeq}` })),
+    createOrder: vi.fn(async () => {
+      if (flags.failCreate) throw new Error("paypal create failed");
+      return { orderId: `ORDER-${++orderSeq}` };
+    }),
     authorizeOrder: vi.fn(async (orderId: string) => {
       if (flags.failAuthorize) throw new Error("paypal authorize failed");
-      return { authorizationId: `AUTH-${orderId}`, status: "CREATED" };
+      return { authorizationId: `AUTH-${orderId}`, status: statuses.authorize };
     }),
     captureAuthorization: vi.fn(async () => {
       if (captureDelayMs > 0) await sleep(captureDelayMs);
       if (flags.failCapture) throw new Error("paypal capture failed");
-      return { captureId: `CAP-${++captureSeq}`, status: "COMPLETED" };
+      return { captureId: `CAP-${++captureSeq}`, status: statuses.capture };
     }),
     voidAuthorization: vi.fn(async () => {
       if (flags.failVoid) throw new Error("paypal void failed");
     }),
   };
-  return { paypal, flags };
+  return { paypal, flags, statuses };
 }
 
 function makeFakeVerify(scoreRef: { score: number }, delayMs = 0) {
@@ -136,18 +145,21 @@ describe("happy path auto-capture", () => {
     ]);
   });
 
-  it("derives idempotency request IDs as ${milestoneId}:${transition}", async () => {
+  it("derives create-order ID from the persisted funding attempt and capture ID from the authorization", async () => {
     await driveToDelivered("milestone-1");
     await wf.decide("milestone-1");
 
-    expect(fake.paypal.createOrder).toHaveBeenCalledWith(
-      20000,
-      "milestone-1",
-      "milestone-1:create-order",
-    );
+    const createArgs = fake.paypal.createOrder.mock
+      .calls[0] as unknown as [number, string, string];
+    expect(createArgs[0]).toBe(20000);
+    expect(createArgs[1]).toBe("milestone-1");
+    expect(createArgs[2]).toMatch(/^milestone-1:create-order:.+/);
+    const attemptId = milestone("milestone-1").fundingAttemptId;
+    expect(attemptId).toBeTruthy();
+    expect(createArgs[2]).toBe(`milestone-1:create-order:${attemptId}`);
     expect(fake.paypal.captureAuthorization).toHaveBeenCalledWith(
       "AUTH-ORDER-1",
-      "milestone-1:capture",
+      "AUTH-ORDER-1:capture",
     );
   });
 
@@ -158,6 +170,49 @@ describe("happy path auto-capture", () => {
     expect(fake.paypal.createOrder).toHaveBeenCalledTimes(1);
     expect(milestone("milestone-1").state).toBe("DRAFT");
     expect(milestone("milestone-1").paypalOrderId).toBe(first.orderId);
+  });
+
+  it("retry of the same funding attempt reuses its create-order request ID", async () => {
+    fake.flags.failCreate = true;
+    await expect(wf.fundMilestone("milestone-1")).rejects.toThrow(
+      "paypal create failed",
+    );
+    fake.flags.failCreate = false;
+    await wf.fundMilestone("milestone-1");
+
+    const calls = fake.paypal.createOrder.mock.calls as unknown as Array<
+      [number, string, string]
+    >;
+    expect(calls).toHaveLength(2);
+    expect(calls[1][2]).toBe(calls[0][2]);
+    expect(milestone("milestone-1").paypalOrderId).toBe("ORDER-1");
+  });
+
+  it("reset-then-refund calls createOrder with a different request ID and succeeds", async () => {
+    await driveToDelivered("milestone-1");
+    await wf.decide("milestone-1");
+    expect(milestone("milestone-1").state).toBe("RELEASED");
+    const firstRequestId = (
+      fake.paypal.createOrder.mock.calls[0] as unknown as [
+        number,
+        string,
+        string,
+      ]
+    )[2];
+
+    await wf.resetDemoFlow();
+    expect(milestone("milestone-1").state).toBe("DRAFT");
+    expect(milestone("milestone-1").fundingAttemptId).toBeNull();
+    expect(milestone("milestone-1").paypalOrderId).toBeNull();
+
+    const { orderId } = await wf.fundMilestone("milestone-1");
+    expect(orderId).toBe("ORDER-2");
+    const calls = fake.paypal.createOrder.mock.calls as unknown as Array<
+      [number, string, string]
+    >;
+    expect(calls).toHaveLength(2);
+    expect(calls[1][2]).not.toBe(firstRequestId);
+    expect(milestone("milestone-1").paypalOrderId).toBe("ORDER-2");
   });
 });
 
@@ -266,6 +321,48 @@ describe("PayPal failure handling", () => {
     expect(milestone("milestone-1").state).toBe("AUTHORIZED");
     expect(milestone("milestone-1").paypalAuthorizationId).toBe(`AUTH-${orderId}`);
     expect(fake.paypal.createOrder).toHaveBeenCalledTimes(1);
+  });
+
+  it("confirmAuthorization rejects a mismatched order without any PayPal authorize call", async () => {
+    const { orderId } = await wf.fundMilestone("milestone-1");
+    fake.paypal.authorizeOrder.mockClear();
+
+    const err = await wf
+      .confirmAuthorization("milestone-1", "ORDER-OTHER")
+      .catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(InvalidTransitionError);
+    expect((err as Error).message).toMatch(/does not match/);
+    expect(fake.paypal.authorizeOrder).not.toHaveBeenCalled();
+    expect(milestone("milestone-1").state).toBe("DRAFT");
+    expect(milestone("milestone-1").paypalOrderId).toBe(orderId);
+    expect(milestone("milestone-1").paypalAuthorizationId).toBeNull();
+  });
+
+  it("non-CREATED authorization status stays DRAFT with an authorize_failed event", async () => {
+    const { orderId } = await wf.fundMilestone("milestone-1");
+    fake.statuses.authorize = "DENIED";
+
+    await expect(wf.confirmAuthorization("milestone-1", orderId)).rejects.toThrow(
+      /DENIED/,
+    );
+    const m = milestone("milestone-1");
+    expect(m.state).toBe("DRAFT");
+    expect(m.paypalAuthorizationId).toBeNull();
+    expect(m.paypalOrderId).toBe(orderId);
+    expect(getState().events.map((e) => e.action)).toContain("authorize_failed");
+  });
+
+  it("non-COMPLETED capture status escalates with no capture id or ledger row", async () => {
+    await driveToDelivered("milestone-1");
+    fake.statuses.capture = "PENDING";
+
+    await expect(wf.decide("milestone-1")).rejects.toThrow(/PENDING/);
+    const m = milestone("milestone-1");
+    expect(m.state).toBe("ESCALATED");
+    expect(m.paypalCaptureId).toBeNull();
+    expect(getState().ledger).toHaveLength(0);
+    expect(getState().events.map((e) => e.action)).toContain("capture_failed");
+    expect(getState().events.map((e) => e.action)).not.toContain("released");
   });
 
   it("capture failure during decide leaves ESCALATED with no ledger row, then approveCapture recovers", async () => {
