@@ -28,6 +28,7 @@ interface MilestoneDetailProps {
   onRerun: () => Promise<boolean>;
   onState: (state: DemoState) => void;
   onFundingError: (message: string) => void;
+  onFundingPendingChange: (pending: boolean) => boolean;
 }
 
 export default function MilestoneDetail({
@@ -44,6 +45,7 @@ export default function MilestoneDetail({
   onRerun,
   onState,
   onFundingError,
+  onFundingPendingChange,
 }: MilestoneDetailProps) {
   const busy = busyKey !== null;
   const isClient = role === "client";
@@ -139,8 +141,10 @@ export default function MilestoneDetail({
         <FundingButton
           milestone={milestone}
           role={role}
+          locked={busy}
           onState={onState}
           onError={onFundingError}
+          onPendingChange={onFundingPendingChange}
         />
       ) : null}
 
@@ -168,7 +172,7 @@ export default function MilestoneDetail({
         <DeliverForm
           milestone={milestone}
           role={role}
-          busy={busyKey === "deliver"}
+          busy={busy}
           onDeliver={onDeliver}
         />
       ) : null}

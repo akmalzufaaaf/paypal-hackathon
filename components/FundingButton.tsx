@@ -15,8 +15,12 @@ import {
 interface FundingButtonProps {
   milestone: Milestone;
   role: Role;
+  /** True while the page-level mutation lock is held (any mutation). */
+  locked: boolean;
   onState: (state: DemoState) => void;
   onError: (message: string) => void;
+  /** Reports in-flight create/authorize calls; returns false when busy. */
+  onPendingChange: (pending: boolean) => boolean;
 }
 
 function messageOf(err: unknown): string {
@@ -31,20 +35,27 @@ function messageOf(err: unknown): string {
 export default function FundingButton({
   milestone,
   role,
+  locked,
   onState,
   onError,
+  onPendingChange,
 }: FundingButtonProps) {
   const clientId = process.env.NEXT_PUBLIC_PAYPAL_CLIENT_ID;
   const [error, setError] = useState<string | null>(null);
+  const [pending, setPending] = useState(false);
   const containerRef = useRef<HTMLDivElement | null>(null);
   const buttonsRef = useRef<PayPalButtonsComponent | null>(null);
   const onStateRef = useRef(onState);
   const onErrorRef = useRef(onError);
+  const onPendingChangeRef = useRef(onPendingChange);
+  const lockedRef = useRef(locked);
 
   useEffect(() => {
     onStateRef.current = onState;
     onErrorRef.current = onError;
-  }, [onState, onError]);
+    onPendingChangeRef.current = onPendingChange;
+    lockedRef.current = locked;
+  }, [onState, onError, onPendingChange, locked]);
 
   useEffect(() => {
     if (!clientId || role !== "client" || milestone.state !== "DRAFT") {
@@ -64,6 +75,17 @@ export default function FundingButton({
           style: { layout: "vertical", label: "paypal" },
           createOrder: async () => {
             setError(null);
+            // The PayPal iframe cannot be disabled, so guard here: never
+            // start (or apply state from) a funding call while another
+            // mutation owns the page lock.
+            if (lockedRef.current || !onPendingChangeRef.current(true)) {
+              const message =
+                "Another action is in progress. Wait for it to finish before funding.";
+              setError(message);
+              onErrorRef.current(message);
+              throw new Error(message);
+            }
+            setPending(true);
             try {
               const { orderId, state } = await createPayPalOrder(milestone.id);
               onStateRef.current(state);
@@ -73,10 +95,21 @@ export default function FundingButton({
               setError(message);
               onErrorRef.current(message);
               throw err;
+            } finally {
+              setPending(false);
+              onPendingChangeRef.current(false);
             }
           },
           onApprove: async (data) => {
             setError(null);
+            if (lockedRef.current || !onPendingChangeRef.current(true)) {
+              const message =
+                "Another action is in progress. Wait for it to finish before funding.";
+              setError(message);
+              onErrorRef.current(message);
+              throw new Error(message);
+            }
+            setPending(true);
             try {
               const state = await authorizePayPalOrder(milestone.id, data.orderID);
               onStateRef.current(state);
@@ -85,6 +118,9 @@ export default function FundingButton({
               setError(message);
               onErrorRef.current(message);
               throw err;
+            } finally {
+              setPending(false);
+              onPendingChangeRef.current(false);
             }
           },
           onError: (err) => {
@@ -154,6 +190,10 @@ export default function FundingButton({
         places an authorization hold, it does not pay the freelancer yet.
       </p>
       <div ref={containerRef} className="paypal-buttons" />
+      {locked && !pending ? (
+        <p className="hint">Another action is in progress — funding is paused.</p>
+      ) : null}
+      {pending ? <p className="muted small">Contacting PayPal…</p> : null}
       {error ? (
         <p className="alert" role="alert">
           {error}

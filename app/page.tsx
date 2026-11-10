@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 
 import AuditLog from "@/components/AuditLog";
 import MilestoneDetail from "@/components/MilestoneDetail";
@@ -52,27 +52,86 @@ export default function Home() {
     };
   }, [reloadKey]);
 
+  // One global mutation lock for every mutating path (API mutations and
+  // PayPal funding). `busyRef` blocks re-entry synchronously (before React
+  // re-renders disabled controls), and `seqRef` tags the lock owner: only
+  // the current owner's response may replace state or clear the lock, so a
+  // late response from a superseded call can never overwrite newer state.
+  const busyRef = useRef(false);
+  const seqRef = useRef(0);
+  const fundingSeqRef = useRef<number | null>(null);
+
+  const acquireLock = useCallback((key: string): number | null => {
+    if (busyRef.current) return null;
+    busyRef.current = true;
+    const seq = ++seqRef.current;
+    setBusyKey(key);
+    return seq;
+  }, []);
+
+  const releaseLock = useCallback((seq: number): void => {
+    if (seq !== seqRef.current) return;
+    busyRef.current = false;
+    setBusyKey(null);
+  }, []);
+
+  const applyState = useCallback((next: DemoState, seq: number): boolean => {
+    if (seq !== seqRef.current) return false;
+    setState(next);
+    setSelectedId((current) =>
+      current && next.milestones.some((m) => m.id === current)
+        ? current
+        : (next.milestones[0]?.id ?? null),
+    );
+    return true;
+  }, []);
+
   const runMutation = useCallback(
     async (key: string, fn: () => Promise<DemoState>): Promise<boolean> => {
-      setBusyKey(key);
+      const seq = acquireLock(key);
+      if (seq === null) return false; // another mutation already owns the lock
       setActionError(null);
       try {
         const next = await fn();
-        setState(next);
-        setSelectedId((current) =>
-          current && next.milestones.some((m) => m.id === current)
-            ? current
-            : (next.milestones[0]?.id ?? null),
-        );
-        return true;
+        return applyState(next, seq);
       } catch (err) {
-        setActionError(messageOf(err));
+        if (seq === seqRef.current) setActionError(messageOf(err));
         return false;
       } finally {
-        setBusyKey(null);
+        releaseLock(seq);
       }
     },
-    [],
+    [acquireLock, applyState, releaseLock],
+  );
+
+  // PayPal create-order/authorize pending is tracked through the same lock:
+  // FundingButton reports each in-flight call, and only a state delivered
+  // while that funding sequence still owns the lock is applied.
+  const handleFundingPendingChange = useCallback(
+    (pending: boolean): boolean => {
+      if (pending) {
+        if (fundingSeqRef.current !== null) return false; // already in flight
+        const seq = acquireLock("funding");
+        if (seq === null) return false;
+        fundingSeqRef.current = seq;
+        return true;
+      }
+      const seq = fundingSeqRef.current;
+      fundingSeqRef.current = null;
+      if (seq !== null) releaseLock(seq);
+      return true;
+    },
+    [acquireLock, releaseLock],
+  );
+
+  const handleFundingState = useCallback(
+    (next: DemoState): void => {
+      const seq = fundingSeqRef.current;
+      if (seq === null) return; // stale funding callback — no longer tracked
+      setActionError(null);
+      applyState(next, seq);
+    },
+    [applyState],
   );
 
   const selected =
@@ -192,11 +251,9 @@ export default function Home() {
                 postMutation(`/api/milestones/${selected.id}/rerun`),
               )
             }
-            onState={(next) => {
-              setActionError(null);
-              setState(next);
-            }}
+            onState={handleFundingState}
             onFundingError={(message) => setActionError(message)}
+            onFundingPendingChange={handleFundingPendingChange}
           />
 
           <div className="right-column">
@@ -209,7 +266,7 @@ export default function Home() {
               key={`${state.project.budgetCapCents}-${state.project.autoPayLimitCents}-${state.project.passThreshold}`}
               project={state.project}
               role={role}
-              busy={busyKey === "policy"}
+              busy={busyKey !== null}
               onSave={(patch: PolicyPatch) =>
                 runMutation("policy", () =>
                   patchMutation("/api/policy", { ...patch }),
@@ -218,7 +275,7 @@ export default function Home() {
             />
             <ResetButton
               role={role}
-              busy={busyKey === "reset"}
+              busy={busyKey !== null}
               onReset={() =>
                 runMutation("reset", () => postMutation("/api/reset"))
               }

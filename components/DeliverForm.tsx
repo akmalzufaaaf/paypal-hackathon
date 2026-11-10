@@ -32,6 +32,7 @@ export default function DeliverForm({
   const [filename, setFilename] = useState("");
   const [extractedText, setExtractedText] = useState("");
   const [formError, setFormError] = useState<string | null>(null);
+  const [submitting, setSubmitting] = useState(false);
 
   const canSubmit =
     role === "freelancer" &&
@@ -59,17 +60,19 @@ export default function DeliverForm({
 
   async function handleSubmit(event: React.FormEvent<HTMLFormElement>) {
     event.preventDefault();
+    if (busy || submitting) return; // global mutation lock
     if (!note.trim() && !link.trim() && !extractedText.trim()) {
       setFormError("Add a delivery note, a link, or file text before submitting.");
       return;
     }
     setFormError(null);
+    setSubmitting(true);
     const ok = await onDeliver({
       note: note.trim(),
       link: link.trim() ? link.trim() : null,
       filename: filename.trim() ? filename.trim() : null,
       extractedText,
-    });
+    }).finally(() => setSubmitting(false));
     if (ok) {
       setNote("");
       setLink("");
@@ -148,7 +151,7 @@ export default function DeliverForm({
       ) : null}
 
       <button type="submit" className="btn primary" disabled={!canSubmit}>
-        {busy ? "Submitting…" : "Submit deliverable"}
+        {submitting ? "Submitting…" : "Submit deliverable"}
       </button>
     </form>
   );

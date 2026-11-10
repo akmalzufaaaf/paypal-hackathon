@@ -35,6 +35,7 @@ export default function PolicyPanel({
   );
   const [threshold, setThreshold] = useState(String(project.passThreshold));
   const [formError, setFormError] = useState<string | null>(null);
+  const [saving, setSaving] = useState(false);
 
   // The parent remounts this panel (via `key`) when saved policy changes,
   // so local inputs always start from the persisted project values.
@@ -49,6 +50,7 @@ export default function PolicyPanel({
 
   async function handleSave(event: React.FormEvent<HTMLFormElement>) {
     event.preventDefault();
+    if (busy || saving) return; // global mutation lock
     if (budgetCapCents === null || autoPayLimitCents === null || !thresholdValid) {
       setFormError(
         "Enter a budget cap and auto-pay limit of $0 or more, and a threshold between 0 and 100.",
@@ -56,7 +58,10 @@ export default function PolicyPanel({
       return;
     }
     setFormError(null);
-    await onSave({ budgetCapCents, autoPayLimitCents, passThreshold });
+    setSaving(true);
+    await onSave({ budgetCapCents, autoPayLimitCents, passThreshold }).finally(
+      () => setSaving(false),
+    );
   }
 
   return (
@@ -117,7 +122,7 @@ export default function PolicyPanel({
           className="btn"
           disabled={!isClient || busy || !valid}
         >
-          {busy ? "Saving…" : "Save policy"}
+          {saving ? "Saving…" : "Save policy"}
         </button>
       </form>
     </section>
