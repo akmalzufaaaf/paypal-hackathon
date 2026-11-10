@@ -209,6 +209,49 @@ describe("verifyDeliverable — LLM path", () => {
     expect(result.provider).toBe("fallback");
   });
 
+  it("LLM stub with an item missing evidence falls back (evidence is not fabricated)", async () => {
+    const payload = validLlmPayload();
+    delete (payload.items[1] as { evidence?: string }).evidence;
+    const stub = vi.fn(async (): Promise<unknown> => payload);
+
+    const result = await verifyDeliverable(sampleInput(), stub);
+
+    expect(result.provider).toBe("fallback");
+    expect(result.score).toBe(80);
+  });
+
+  it("LLM stub with non-string evidence falls back", async () => {
+    const payload = validLlmPayload();
+    (payload.items[0] as { evidence: unknown }).evidence = 42;
+    const stub = vi.fn(async (): Promise<unknown> => payload);
+
+    const result = await verifyDeliverable(sampleInput(), stub);
+
+    expect(result.provider).toBe("fallback");
+    expect(result.score).toBe(80);
+  });
+
+  it("LLM stub with empty-string evidence falls back", async () => {
+    const payload = validLlmPayload();
+    payload.items[2].evidence = "   ";
+    const stub = vi.fn(async (): Promise<unknown> => payload);
+
+    const result = await verifyDeliverable(sampleInput(), stub);
+
+    expect(result.provider).toBe("fallback");
+    expect(result.score).toBe(80);
+  });
+
+  it("LLM stub returning a bare items array (no wrapping object) falls back", async () => {
+    const payload = validLlmPayload();
+    const stub = vi.fn(async (): Promise<unknown> => payload.items);
+
+    const result = await verifyDeliverable(sampleInput(), stub);
+
+    expect(result.provider).toBe("fallback");
+    expect(result.score).toBe(80);
+  });
+
   it("LLM stub with an invalid verdict value falls back", async () => {
     const payload = validLlmPayload();
     (payload.items[0] as { verdict: string }).verdict = "great";

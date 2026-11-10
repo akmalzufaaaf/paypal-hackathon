@@ -85,6 +85,10 @@ export async function chatJson(prompt: string): Promise<unknown> {
   const apiKey = requiredEnv("AI_API_KEY");
   const baseUrl = requiredEnv("AI_BASE_URL").replace(/\/+$/, "");
   const model = requiredEnv("AI_MODEL");
+  // Contract: AI_BASE_URL is canonically an OpenAI-compatible provider
+  // BASE URL (e.g. https://provider.example/v1), and chatJson POSTs to
+  // {AI_BASE_URL}/chat/completions. A base already ending in
+  // /chat/completions is used verbatim — never double-appended.
   const url = baseUrl.endsWith("/chat/completions")
     ? baseUrl
     : `${baseUrl}/chat/completions`;

@@ -110,17 +110,16 @@ const VERDICTS = new Set(["pass", "fail", "unclear"]);
 type ParsedLlm = { items: ItemVerdict[]; summary?: string };
 
 /**
- * Validate a raw LLM reply: it must be `{ items: [...] }` (or a bare
- * array) covering every checklist requirement exactly once, each with
- * a valid verdict. Items are returned in checklist order with the
- * canonical requirement text. Returns null on any deviation.
+ * Validate a raw LLM reply: it must be a non-array object with an
+ * `items` array covering every checklist requirement exactly once,
+ * each with a valid verdict and a non-empty string evidence. No item
+ * is repaired — any deviation returns null so the caller runs the
+ * deterministic fallback. Valid items are returned in checklist order
+ * with the canonical requirement text.
  */
 function parseLlmResult(raw: unknown, checklist: string[]): ParsedLlm | null {
-  const container: { items?: unknown; summary?: unknown } = Array.isArray(raw)
-    ? { items: raw }
-    : raw && typeof raw === "object"
-      ? (raw as { items?: unknown; summary?: unknown })
-      : {};
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return null;
+  const container = raw as { items?: unknown; summary?: unknown };
   if (!Array.isArray(container.items)) return null;
   if (container.items.length !== checklist.length) return null;
 
@@ -143,11 +142,12 @@ function parseLlmResult(raw: unknown, checklist: string[]): ParsedLlm | null {
     const left = remaining.get(key) ?? 0;
     if (left === 0) return null; // extra, duplicate, or paraphrased item
     if (typeof verdict !== "string" || !VERDICTS.has(verdict)) return null;
+    if (typeof evidence !== "string" || !evidence.trim()) return null;
     remaining.set(key, left - 1);
     const item: ItemVerdict = {
       requirement: key,
       verdict: verdict as ItemVerdict["verdict"],
-      evidence: typeof evidence === "string" ? evidence : "",
+      evidence,
     };
     byRequirement.set(key, [...(byRequirement.get(key) ?? []), item]);
   }
