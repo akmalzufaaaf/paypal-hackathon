@@ -2,13 +2,13 @@ import { describe, expect, it } from "vitest";
 import { canTransition } from "../lib/transitions";
 import type { MilestoneState } from "../lib/types";
 
-// Controller ruling: exactly this set. Terminal RELEASED/VOIDED allow no exits.
-// Note: this overrides the brief's Step 1 row `VERIFIED->ESCALATED` true.
+// Controller ruling correction: exactly these 9 edges. Terminal RELEASED/VOIDED allow no exits.
 const ALLOWED: ReadonlyArray<readonly [MilestoneState, MilestoneState]> = [
   ["DRAFT", "AUTHORIZED"],
   ["AUTHORIZED", "DELIVERED"],
   ["DELIVERED", "VERIFIED"],
   ["VERIFIED", "CAPTURED"],
+  ["VERIFIED", "ESCALATED"],
   ["ESCALATED", "CAPTURED"],
   ["CAPTURED", "RELEASED"],
   ["VERIFIED", "VOIDED"],
@@ -51,8 +51,8 @@ describe("canTransition", () => {
     expect(canTransition("AUTHORIZED", "CAPTURED")).toBe(false);
   });
 
-  it("rejects VERIFIED -> ESCALATED per controller ruling (not in the exact allowed set)", () => {
-    expect(canTransition("VERIFIED", "ESCALATED")).toBe(false);
+  it("allows VERIFIED -> ESCALATED", () => {
+    expect(canTransition("VERIFIED", "ESCALATED")).toBe(true);
   });
 
   it("rejects VERIFIED -> RELEASED (must go via CAPTURED)", () => {
