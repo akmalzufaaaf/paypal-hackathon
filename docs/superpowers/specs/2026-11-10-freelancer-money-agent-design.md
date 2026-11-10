@@ -145,6 +145,20 @@ Every transition writes an `AgentEvent` (actor: agent/client/freelancer,
 rule inputs, decision, PayPal IDs, timestamp). The audit log panel is a
 first-class screen element, not a debug page.
 
+**Re-evaluation:** editing policy never re-runs the agent automatically.
+A milestone in `VERIFIED` or `ESCALATED` shows a **Re-run policy**
+button; clicking it is an explicit client action that re-applies the
+policy table with the current settings (and may therefore auto-capture
+if every rule now passes). The event is logged with the policy snapshot
+used. (Builder's call, from builder check.)
+
+**Demo repeatability:** the hosted demo is one shared seeded project.
+A **Reset demo** action voids any live `AUTHORIZED` hold (best effort),
+clears milestones/deliverables/verifications/ledger/agent events,
+re-seeds the demo project, and logs the reset. Simultaneous judges
+share state — an accepted limitation; the video is the primary judging
+artefact. (Builder's call, from builder check.)
+
 ### Screens (single-page app, three panels)
 
 ```
@@ -177,6 +191,13 @@ time so a judge can change the limit and re-run the refusal live.
 The LLM never decides money movement. It only produces the score and
 verdicts; this table — plain code — decides. That separation is a
 pitch point ("the AI advises, the policy disposes").
+
+**Budget cap is a hard ceiling:** client approval on an escalation can
+override the auto-pay limit and a failing AI score (the human takes
+responsibility), but it can **never** override a budget-cap breach.
+For a cap breach the capture action stays disabled until the client
+raises the cap (a logged policy edit) or voids the authorization.
+(Builder's call, from builder check.)
 
 ### AI verification
 
