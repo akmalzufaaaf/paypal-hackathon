@@ -166,6 +166,15 @@ describe("createOrder", () => {
     expect(JSON.parse(call!.body!).purchase_units[0].amount.value).toBe("1.99");
   });
 
+  it("rejects an empty requestId without making any fetch call", async () => {
+    stubFetch();
+    const { createOrder, PayPalError } = await loadClient();
+    const err = await createOrder(20000, "m1", "").catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(PayPalError);
+    expect((err as Error).message).toMatch(/request.?id/i);
+    expect(calls).toHaveLength(0);
+  });
+
   it("throws PayPalError (never returns an undefined id) when a 2xx order response has no id", async () => {
     stubFetch((call) => {
       if (call.url.endsWith("/v1/oauth2/token")) return jsonResponse(200, TOKEN);
@@ -191,6 +200,30 @@ describe("authorizeOrder", () => {
     expect(call!.method).toBe("POST");
     expect(call!.headers.Authorization).toBe("Bearer TOKEN-1");
     expect(call!.headers["PayPal-Request-Id"]).toBeTruthy();
+  });
+
+  it("sends the same deterministic PayPal-Request-Id on retry for the same order", async () => {
+    stubFetch();
+    const { authorizeOrder } = await loadClient();
+    await authorizeOrder("ORDER-123");
+    await authorizeOrder("ORDER-123");
+    const authCalls = calls.filter((c) => c.url.endsWith("/authorize"));
+    expect(authCalls).toHaveLength(2);
+    expect(authCalls[0].headers["PayPal-Request-Id"]).toBe("authorize:ORDER-123");
+    expect(authCalls[1].headers["PayPal-Request-Id"]).toBe(authCalls[0].headers["PayPal-Request-Id"]);
+  });
+
+  it("throws PayPalError when the authorize response has no authorization status", async () => {
+    stubFetch((call) => {
+      if (call.url.endsWith("/v1/oauth2/token")) return jsonResponse(200, TOKEN);
+      if (call.url.endsWith("/authorize")) return jsonResponse(200, { id: "ORDER-123", status: "COMPLETED", purchase_units: [{ payments: { authorizations: [{ id: "AUTH-456" }] } }] });
+      return defaultHandler(call);
+    });
+    const { authorizeOrder, PayPalError } = await loadClient();
+    const err = await authorizeOrder("ORDER-123").catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(PayPalError);
+    expect((err as InstanceType<typeof PayPalError>).name).toBe("INVALID_RESPONSE");
+    expect((err as Error).message).toMatch(/authorization status/i);
   });
 
   it("throws PayPalError when the authorize response has no authorization", async () => {
@@ -219,6 +252,28 @@ describe("captureAuthorization", () => {
     expect(call!.headers["PayPal-Request-Id"]).toBe("req-capture-1");
   });
 
+  it("rejects an empty requestId without making any fetch call", async () => {
+    stubFetch();
+    const { captureAuthorization, PayPalError } = await loadClient();
+    const err = await captureAuthorization("AUTH-456", "").catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(PayPalError);
+    expect((err as Error).message).toMatch(/request.?id/i);
+    expect(calls).toHaveLength(0);
+  });
+
+  it("throws PayPalError when a 2xx capture response has no status", async () => {
+    stubFetch((call) => {
+      if (call.url.endsWith("/v1/oauth2/token")) return jsonResponse(200, TOKEN);
+      if (call.url.endsWith("/capture")) return jsonResponse(201, { id: "CAP-789" });
+      return defaultHandler(call);
+    });
+    const { captureAuthorization, PayPalError } = await loadClient();
+    const err = await captureAuthorization("AUTH-456", "req-1").catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(PayPalError);
+    expect((err as InstanceType<typeof PayPalError>).name).toBe("INVALID_RESPONSE");
+    expect((err as Error).message).toMatch(/capture status/i);
+  });
+
   it("throws PayPalError when a 2xx capture response has no id", async () => {
     stubFetch((call) => {
       if (call.url.endsWith("/v1/oauth2/token")) return jsonResponse(200, TOKEN);
@@ -241,6 +296,17 @@ describe("voidAuthorization and getOrder", () => {
     expect(call).toBeDefined();
     expect(call!.method).toBe("POST");
     expect(call!.headers["PayPal-Request-Id"]).toBeTruthy();
+  });
+
+  it("sends the same deterministic PayPal-Request-Id on retry for the same authorization", async () => {
+    stubFetch();
+    const { voidAuthorization } = await loadClient();
+    await voidAuthorization("AUTH-456");
+    await voidAuthorization("AUTH-456");
+    const voidCalls = calls.filter((c) => c.url.endsWith("/void"));
+    expect(voidCalls).toHaveLength(2);
+    expect(voidCalls[0].headers["PayPal-Request-Id"]).toBe("void:AUTH-456");
+    expect(voidCalls[1].headers["PayPal-Request-Id"]).toBe(voidCalls[0].headers["PayPal-Request-Id"]);
   });
 
   it("getOrder returns the order status", async () => {

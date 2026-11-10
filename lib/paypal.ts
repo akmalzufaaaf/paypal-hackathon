@@ -1,5 +1,3 @@
-import { randomUUID } from "node:crypto";
-
 /**
  * Server-only PayPal sandbox REST client.
  *
@@ -125,16 +123,29 @@ async function getAccessToken(): Promise<string> {
   return token.access_token;
 }
 
+function requireRequestId(requestId: string | undefined): string {
+  if (!requestId || !requestId.trim()) {
+    throw new PayPalError(
+      "INVALID_REQUEST",
+      "PayPal-Request-Id must not be empty",
+      0,
+    );
+  }
+  return requestId;
+}
+
 async function paypalFetch(
   path: string,
   options: { method?: string; body?: unknown; requestId?: string } = {},
 ): Promise<{ data: unknown; status: number }> {
+  const requestId =
+    options.requestId === undefined ? undefined : requireRequestId(options.requestId);
   const token = await getAccessToken();
   const headers: Record<string, string> = {
     "Content-Type": "application/json",
     Authorization: `Bearer ${token}`,
   };
-  if (options.requestId) headers["PayPal-Request-Id"] = options.requestId;
+  if (requestId) headers["PayPal-Request-Id"] = requestId;
 
   const res = await fetch(`${apiBase()}${path}`, {
     method: options.method ?? "GET",
@@ -154,11 +165,20 @@ function missingId(kind: string, status: number): PayPalError {
   );
 }
 
+function missingStatus(kind: string, status: number): PayPalError {
+  return new PayPalError(
+    "INVALID_RESPONSE",
+    `PayPal response had no ${kind} status`,
+    status,
+  );
+}
+
 export async function createOrder(
   amountCents: number,
   referenceId: string,
   requestId: string,
 ): Promise<{ orderId: string }> {
+  requireRequestId(requestId);
   const { data, status } = await paypalFetch("/v2/checkout/orders", {
     method: "POST",
     requestId,
@@ -182,7 +202,8 @@ export async function authorizeOrder(
 ): Promise<{ authorizationId: string; status: string }> {
   const { data, status } = await paypalFetch(
     `/v2/checkout/orders/${encodeURIComponent(orderId)}/authorize`,
-    { method: "POST", requestId: randomUUID(), body: {} },
+    // Deterministic: a retry of the same logical authorize replays the same ID.
+    { method: "POST", requestId: `authorize:${orderId}`, body: {} },
   );
   const authorization = (
     data as {
@@ -192,26 +213,30 @@ export async function authorizeOrder(
     } | null
   )?.purchase_units?.[0]?.payments?.authorizations?.[0];
   if (!authorization?.id) throw missingId("authorization", status);
-  return { authorizationId: authorization.id, status: authorization.status ?? "" };
+  if (!authorization.status) throw missingStatus("authorization", status);
+  return { authorizationId: authorization.id, status: authorization.status };
 }
 
 export async function captureAuthorization(
   authorizationId: string,
   requestId: string,
 ): Promise<{ captureId: string; status: string }> {
+  requireRequestId(requestId);
   const { data, status } = await paypalFetch(
     `/v2/payments/authorizations/${encodeURIComponent(authorizationId)}/capture`,
     { method: "POST", requestId, body: { final_capture: true } },
   );
   const capture = data as { id?: string; status?: string } | null;
   if (!capture?.id) throw missingId("capture", status);
-  return { captureId: capture.id, status: capture.status ?? "" };
+  if (!capture.status) throw missingStatus("capture", status);
+  return { captureId: capture.id, status: capture.status };
 }
 
 export async function voidAuthorization(authorizationId: string): Promise<void> {
   await paypalFetch(
     `/v2/payments/authorizations/${encodeURIComponent(authorizationId)}/void`,
-    { method: "POST", requestId: randomUUID() },
+    // Deterministic: a retry of the same logical void replays the same ID.
+    { method: "POST", requestId: `void:${authorizationId}` },
   );
 }
 
