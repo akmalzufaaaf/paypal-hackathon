@@ -6,6 +6,7 @@
 services:
   - type: web
     name: rilis
+    plan: free
     runtime: node
     buildCommand: npm install && npm run build
     startCommand: npm start
