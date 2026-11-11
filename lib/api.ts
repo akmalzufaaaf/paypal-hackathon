@@ -75,8 +75,10 @@ export function errorResponse(err: unknown): NextResponse {
   return NextResponse.json({ ok: false, error }, { status });
 }
 
-export function okResponse(extra: Record<string, unknown> = {}): NextResponse {
-  return NextResponse.json({ ok: true, state: getState(), ...extra });
+export async function okResponse(
+  extra: Record<string, unknown> = {},
+): Promise<NextResponse> {
+  return NextResponse.json({ ok: true, state: await getState(), ...extra });
 }
 
 const MILESTONE_ID_PATTERN = /^[A-Za-z0-9_-]+$/;

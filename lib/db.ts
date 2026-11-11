@@ -1,7 +1,10 @@
-import fs from "node:fs";
-import path from "node:path";
-import Database from "better-sqlite3";
+import { createClient, type Client, type InStatement, type ResultSet } from "@libsql/client";
 import { DEMO, MILESTONE1_CHECKLIST, MILESTONE2_CHECKLIST } from "./constants";
+
+/** Minimal executor shared by a libSQL Client and a libSQL Transaction. */
+export interface SqlExecutor {
+  execute(stmt: InStatement): Promise<ResultSet>;
+}
 
 const PROJECT_ID = "demo-project";
 const MILESTONE1_ID = "milestone-1";
@@ -74,68 +77,82 @@ CREATE TABLE IF NOT EXISTS agent_events (
 );
 `;
 
-let cached: { key: string; db: Database.Database } | null = null;
+const PASSTHROUGH_PREFIXES = [":memory:", "file:", "libsql:", "https:", "wss:"];
 
-export function getDb(): Database.Database {
-  const rawPath = process.env.RILIS_DB_PATH?.trim() || "./data/rilis.db";
-  const isMemory = rawPath === ":memory:";
-  const key = isMemory ? ":memory:" : path.resolve(rawPath);
+function resolveConfig(): { url: string; authToken?: string } {
+  const authToken = process.env.TURSO_AUTH_TOKEN?.trim() || undefined;
+  const tursoUrl = process.env.TURSO_DATABASE_URL?.trim();
+  if (tursoUrl) {
+    return authToken ? { url: tursoUrl, authToken } : { url: tursoUrl };
+  }
+  const rawPath = process.env.RILIS_DB_PATH?.trim();
+  if (!rawPath) {
+    return authToken ? { url: ":memory:", authToken } : { url: ":memory:" };
+  }
+  const url = PASSTHROUGH_PREFIXES.some((prefix) => rawPath.startsWith(prefix))
+    ? rawPath
+    : `file:${rawPath}`;
+  return authToken ? { url, authToken } : { url };
+}
 
+let cached: { key: string; promise: Promise<Client> } | null = null;
+
+async function initClient(client: Client): Promise<Client> {
+  await client.executeMultiple(SCHEMA);
+  await ensureFundingAttemptColumn(client);
+  await seedIfEmpty(client);
+  return client;
+}
+
+export function getClient(): Promise<Client> {
+  const config = resolveConfig();
+  const key = JSON.stringify([config.url, config.authToken ?? null]);
   if (cached && cached.key === key) {
-    return cached.db;
+    return cached.promise;
   }
   if (cached) {
-    cached.db.close();
-    cached = null;
+    const stale = cached;
+    void stale.promise.then(
+      (client) => client.close(),
+      () => undefined,
+    );
   }
-
-  if (!isMemory) {
-    fs.mkdirSync(path.dirname(key), { recursive: true });
-  }
-  const db = new Database(key);
-  db.pragma("foreign_keys = ON");
-  db.exec(SCHEMA);
-  ensureFundingAttemptColumn(db);
-  seedIfEmpty(db);
-  cached = { key, db };
-  return db;
+  const promise = initClient(createClient(config));
+  cached = { key, promise };
+  void promise.catch(() => {
+    if (cached?.promise === promise) {
+      cached = null;
+    }
+  });
+  return promise;
 }
 
 /** Add funding_attempt_id to DBs created before the column existed. */
-function ensureFundingAttemptColumn(db: Database.Database): void {
-  const columns = db.prepare("PRAGMA table_info(milestones)").all() as Array<{
-    name: string;
-  }>;
+async function ensureFundingAttemptColumn(db: SqlExecutor): Promise<void> {
+  const result = await db.execute("PRAGMA table_info(milestones)");
+  const columns = result.rows as unknown as Array<{ name: string }>;
   if (!columns.some((c) => c.name === "funding_attempt_id")) {
-    db.exec("ALTER TABLE milestones ADD COLUMN funding_attempt_id TEXT");
+    await db.execute("ALTER TABLE milestones ADD COLUMN funding_attempt_id TEXT");
   }
 }
 
 /** Insert the demo project + milestones if the projects table is empty. */
-export function seedIfEmpty(db: Database.Database): void {
-  const row = db.prepare("SELECT COUNT(*) AS n FROM projects").get() as {
-    n: number;
-  };
-  if (row.n > 0) {
+export async function seedIfEmpty(db: SqlExecutor): Promise<void> {
+  const result = await db.execute("SELECT COUNT(*) AS n FROM projects");
+  const row = result.rows[0] as unknown as { n: number | bigint } | undefined;
+  if (row && Number(row.n) > 0) {
     return;
   }
-  seedDemo(db);
+  await seedDemo(db);
 }
 
 /** Insert the seeded demo project and its two DRAFT milestones. */
-export function seedDemo(db: Database.Database): void {
-  const insertProject = db.prepare(
-    `INSERT INTO projects
+export async function seedDemo(db: SqlExecutor): Promise<void> {
+  await db.execute({
+    sql: `INSERT INTO projects
        (id, title, client_name, freelancer_name, budget_cap_cents, auto_pay_limit_cents, pass_threshold)
      VALUES (?, ?, ?, ?, ?, ?, ?)`,
-  );
-  const insertMilestone = db.prepare(
-    `INSERT INTO milestones
-       (id, project_id, title, brief, checklist_json, amount_cents, state)
-     VALUES (?, ?, ?, ?, ?, ?, 'DRAFT')`,
-  );
-  const seed = db.transaction(() => {
-    insertProject.run(
+    args: [
       PROJECT_ID,
       "Brand logo for Sarah's coffee startup",
       "Sarah (Austin, US)",
@@ -143,38 +160,42 @@ export function seedDemo(db: Database.Database): void {
       DEMO.budgetCapCents,
       DEMO.autoPayLimitCents,
       DEMO.passThreshold,
-    );
-    insertMilestone.run(
+    ],
+  });
+  await db.execute({
+    sql: `INSERT INTO milestones
+       (id, project_id, title, brief, checklist_json, amount_cents, state)
+     VALUES (?, ?, ?, ?, ?, ?, 'DRAFT')`,
+    args: [
       MILESTONE1_ID,
       PROJECT_ID,
       "Primary logo concepts",
       MILESTONE1_BRIEF,
       JSON.stringify(MILESTONE1_CHECKLIST),
       20000,
-    );
-    insertMilestone.run(
+    ],
+  });
+  await db.execute({
+    sql: `INSERT INTO milestones
+       (id, project_id, title, brief, checklist_json, amount_cents, state)
+     VALUES (?, ?, ?, ?, ?, ?, 'DRAFT')`,
+    args: [
       MILESTONE2_ID,
       PROJECT_ID,
       "Full brand kit",
       MILESTONE2_BRIEF,
       JSON.stringify(MILESTONE2_CHECKLIST),
       60000,
-    );
+    ],
   });
-  seed();
 }
 
 /** Delete every row in every table (children first, FK-safe). */
-export function clearAll(db: Database.Database): void {
-  const clear = db.transaction(() => {
-    db.exec(
-      `DELETE FROM agent_events;
-       DELETE FROM ledger_entries;
-       DELETE FROM verifications;
-       DELETE FROM deliverables;
-       DELETE FROM milestones;
-       DELETE FROM projects;`,
-    );
-  });
-  clear();
+export async function clearAll(db: SqlExecutor): Promise<void> {
+  await db.execute("DELETE FROM agent_events");
+  await db.execute("DELETE FROM ledger_entries");
+  await db.execute("DELETE FROM verifications");
+  await db.execute("DELETE FROM deliverables");
+  await db.execute("DELETE FROM milestones");
+  await db.execute("DELETE FROM projects");
 }

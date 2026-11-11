@@ -1,10 +1,10 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
-// Must be set before any getDb() call; repo/db open the DB lazily.
+// Must be set before any getClient() call; repo/db open the DB lazily.
 process.env.RILIS_DB_PATH = ":memory:";
 
 import { SAMPLE_DELIVERABLE_NOTE } from "../lib/constants";
-import { getDb } from "../lib/db";
+import { getClient } from "../lib/db";
 import {
   capturedTotalCents,
   getState,
@@ -74,16 +74,16 @@ let scoreRef: { score: number };
 let verify: ReturnType<typeof makeFakeVerify>;
 let wf: ReturnType<typeof createWorkflow>;
 
-beforeEach(() => {
-  resetDemo();
+beforeEach(async () => {
+  await resetDemo();
   fake = makeFakePayPal();
   scoreRef = { score: 100 };
   verify = makeFakeVerify(scoreRef);
   wf = createWorkflow({ paypal: fake.paypal, verify });
 });
 
-function milestone(id: string) {
-  const m = getState().milestones.find((x) => x.id === id);
+async function milestone(id: string) {
+  const m = (await getState()).milestones.find((x) => x.id === id);
   if (!m) throw new Error(`missing milestone ${id}`);
   return m;
 }
@@ -119,13 +119,13 @@ describe("happy path auto-capture", () => {
     const result = await wf.decide("milestone-1");
     expect(result).toEqual({ action: "AUTO_CAPTURE" });
 
-    const m = milestone("milestone-1");
+    const m = await milestone("milestone-1");
     expect(m.state).toBe("RELEASED");
     expect(m.paypalOrderId).toBe("ORDER-1");
     expect(m.paypalAuthorizationId).toBe("AUTH-ORDER-1");
     expect(m.paypalCaptureId).toBe("CAP-1");
 
-    const state = getState();
+    const state = await getState();
     expect(state.ledger).toHaveLength(1);
     expect(state.ledger[0].milestoneId).toBe("milestone-1");
     expect(state.ledger[0].amountCents).toBe(20000);
@@ -154,7 +154,7 @@ describe("happy path auto-capture", () => {
     expect(createArgs[0]).toBe(20000);
     expect(createArgs[1]).toBe("milestone-1");
     expect(createArgs[2]).toMatch(/^milestone-1:create-order:.+/);
-    const attemptId = milestone("milestone-1").fundingAttemptId;
+    const attemptId = (await milestone("milestone-1")).fundingAttemptId;
     expect(attemptId).toBeTruthy();
     expect(createArgs[2]).toBe(`milestone-1:create-order:${attemptId}`);
     expect(fake.paypal.captureAuthorization).toHaveBeenCalledWith(
@@ -168,8 +168,8 @@ describe("happy path auto-capture", () => {
     const second = await wf.fundMilestone("milestone-1");
     expect(second).toEqual(first);
     expect(fake.paypal.createOrder).toHaveBeenCalledTimes(1);
-    expect(milestone("milestone-1").state).toBe("DRAFT");
-    expect(milestone("milestone-1").paypalOrderId).toBe(first.orderId);
+    expect((await milestone("milestone-1")).state).toBe("DRAFT");
+    expect((await milestone("milestone-1")).paypalOrderId).toBe(first.orderId);
   });
 
   it("retry of the same funding attempt reuses its create-order request ID", async () => {
@@ -185,13 +185,13 @@ describe("happy path auto-capture", () => {
     >;
     expect(calls).toHaveLength(2);
     expect(calls[1][2]).toBe(calls[0][2]);
-    expect(milestone("milestone-1").paypalOrderId).toBe("ORDER-1");
+    expect((await milestone("milestone-1")).paypalOrderId).toBe("ORDER-1");
   });
 
   it("reset-then-refund calls createOrder with a different request ID and succeeds", async () => {
     await driveToDelivered("milestone-1");
     await wf.decide("milestone-1");
-    expect(milestone("milestone-1").state).toBe("RELEASED");
+    expect((await milestone("milestone-1")).state).toBe("RELEASED");
     const firstRequestId = (
       fake.paypal.createOrder.mock.calls[0] as unknown as [
         number,
@@ -201,9 +201,9 @@ describe("happy path auto-capture", () => {
     )[2];
 
     await wf.resetDemoFlow();
-    expect(milestone("milestone-1").state).toBe("DRAFT");
-    expect(milestone("milestone-1").fundingAttemptId).toBeNull();
-    expect(milestone("milestone-1").paypalOrderId).toBeNull();
+    expect((await milestone("milestone-1")).state).toBe("DRAFT");
+    expect((await milestone("milestone-1")).fundingAttemptId).toBeNull();
+    expect((await milestone("milestone-1")).paypalOrderId).toBeNull();
 
     const { orderId } = await wf.fundMilestone("milestone-1");
     expect(orderId).toBe("ORDER-2");
@@ -212,7 +212,7 @@ describe("happy path auto-capture", () => {
     >;
     expect(calls).toHaveLength(2);
     expect(calls[1][2]).not.toBe(firstRequestId);
-    expect(milestone("milestone-1").paypalOrderId).toBe("ORDER-2");
+    expect((await milestone("milestone-1")).paypalOrderId).toBe("ORDER-2");
   });
 });
 
@@ -222,17 +222,17 @@ describe("escalation and client approval", () => {
 
     const result = await wf.decide("milestone-2");
     expect(result).toEqual({ action: "ESCALATE" });
-    expect(milestone("milestone-2").state).toBe("ESCALATED");
-    expect(getState().ledger).toHaveLength(0);
+    expect((await milestone("milestone-2")).state).toBe("ESCALATED");
+    expect((await getState()).ledger).toHaveLength(0);
     expect(fake.paypal.captureAuthorization).not.toHaveBeenCalled();
 
-    const escalated = getState().events.find((e) => e.action === "escalated");
+    const escalated = (await getState()).events.find((e) => e.action === "escalated");
     expect(escalated?.detail).toContain("exceeds the auto-pay limit");
 
     await wf.approveCapture("milestone-2");
-    expect(milestone("milestone-2").state).toBe("RELEASED");
-    expect(milestone("milestone-2").paypalCaptureId).toBe("CAP-1");
-    const state = getState();
+    expect((await milestone("milestone-2")).state).toBe("RELEASED");
+    expect((await milestone("milestone-2")).paypalCaptureId).toBe("CAP-1");
+    const state = await getState();
     expect(state.ledger).toHaveLength(1);
     expect(state.ledger[0].amountCents).toBe(60000);
   });
@@ -243,31 +243,31 @@ describe("escalation and client approval", () => {
 
     const result = await wf.decide("milestone-1");
     expect(result).toEqual({ action: "ESCALATE" });
-    expect(milestone("milestone-1").state).toBe("ESCALATED");
+    expect((await milestone("milestone-1")).state).toBe("ESCALATED");
     expect(fake.paypal.captureAuthorization).not.toHaveBeenCalled();
-    expect(getState().ledger).toHaveLength(0);
+    expect((await getState()).ledger).toHaveLength(0);
 
-    const escalated = getState().events.find((e) => e.action === "escalated");
+    const escalated = (await getState()).events.find((e) => e.action === "escalated");
     expect(escalated?.detail).toContain("below the pass threshold");
   });
 
   it("reject voids the authorization from ESCALATED", async () => {
     const orderId = await driveToDelivered("milestone-2");
     await wf.decide("milestone-2");
-    expect(milestone("milestone-2").state).toBe("ESCALATED");
+    expect((await milestone("milestone-2")).state).toBe("ESCALATED");
 
     await wf.rejectVoid("milestone-2");
-    expect(milestone("milestone-2").state).toBe("VOIDED");
+    expect((await milestone("milestone-2")).state).toBe("VOIDED");
     expect(fake.paypal.voidAuthorization).toHaveBeenCalledWith(`AUTH-${orderId}`);
-    expect(getState().ledger).toHaveLength(0);
-    expect(getState().events.map((e) => e.action)).toContain("voided");
+    expect((await getState()).ledger).toHaveLength(0);
+    expect((await getState()).events.map((e) => e.action)).toContain("voided");
   });
 
   it("reject voids from VERIFIED", async () => {
     const orderId = await driveToDelivered("milestone-1");
     // VERIFIED is transient through decide(); seed the review state directly.
-    updateMilestone("milestone-1", { state: "VERIFIED" });
-    insertVerification({
+    await updateMilestone("milestone-1", { state: "VERIFIED" });
+    await insertVerification({
       milestoneId: "milestone-1",
       provider: "fallback",
       items: [],
@@ -276,7 +276,7 @@ describe("escalation and client approval", () => {
     });
 
     await wf.rejectVoid("milestone-1");
-    expect(milestone("milestone-1").state).toBe("VOIDED");
+    expect((await milestone("milestone-1")).state).toBe("VOIDED");
     expect(fake.paypal.voidAuthorization).toHaveBeenCalledWith(`AUTH-${orderId}`);
   });
 });
@@ -288,17 +288,17 @@ describe("budget cap hard ceiling", () => {
 
     const result = await wf.decide("milestone-2");
     expect(result).toEqual({ action: "ESCALATE" });
-    expect(milestone("milestone-2").state).toBe("ESCALATED");
+    expect((await milestone("milestone-2")).state).toBe("ESCALATED");
 
     const err = await wf.approveCapture("milestone-2").catch((e: unknown) => e);
     expect(err).toBeInstanceOf(PolicyBlocked);
     expect((err as Error).name).toBe("PolicyBlocked");
     expect((err as Error).message).toMatch(/budget cap/i);
 
-    expect(milestone("milestone-2").state).toBe("ESCALATED");
-    expect(milestone("milestone-2").paypalCaptureId).toBeNull();
+    expect((await milestone("milestone-2")).state).toBe("ESCALATED");
+    expect((await milestone("milestone-2")).paypalCaptureId).toBeNull();
     expect(fake.paypal.captureAuthorization).not.toHaveBeenCalled();
-    expect(getState().ledger).toHaveLength(0);
+    expect((await getState()).ledger).toHaveLength(0);
   });
 });
 
@@ -310,16 +310,16 @@ describe("PayPal failure handling", () => {
     await expect(wf.confirmAuthorization("milestone-1", orderId)).rejects.toThrow(
       "paypal authorize failed",
     );
-    const m = milestone("milestone-1");
+    const m = await milestone("milestone-1");
     expect(m.state).toBe("DRAFT");
     expect(m.paypalAuthorizationId).toBeNull();
     expect(m.paypalOrderId).toBe(orderId);
-    expect(getState().events.map((e) => e.action)).toContain("authorize_failed");
+    expect((await getState()).events.map((e) => e.action)).toContain("authorize_failed");
 
     fake.flags.failAuthorize = false;
     await wf.confirmAuthorization("milestone-1", orderId);
-    expect(milestone("milestone-1").state).toBe("AUTHORIZED");
-    expect(milestone("milestone-1").paypalAuthorizationId).toBe(`AUTH-${orderId}`);
+    expect((await milestone("milestone-1")).state).toBe("AUTHORIZED");
+    expect((await milestone("milestone-1")).paypalAuthorizationId).toBe(`AUTH-${orderId}`);
     expect(fake.paypal.createOrder).toHaveBeenCalledTimes(1);
   });
 
@@ -333,9 +333,9 @@ describe("PayPal failure handling", () => {
     expect(err).toBeInstanceOf(InvalidTransitionError);
     expect((err as Error).message).toMatch(/does not match/);
     expect(fake.paypal.authorizeOrder).not.toHaveBeenCalled();
-    expect(milestone("milestone-1").state).toBe("DRAFT");
-    expect(milestone("milestone-1").paypalOrderId).toBe(orderId);
-    expect(milestone("milestone-1").paypalAuthorizationId).toBeNull();
+    expect((await milestone("milestone-1")).state).toBe("DRAFT");
+    expect((await milestone("milestone-1")).paypalOrderId).toBe(orderId);
+    expect((await milestone("milestone-1")).paypalAuthorizationId).toBeNull();
   });
 
   it("non-CREATED authorization status stays DRAFT with an authorize_failed event", async () => {
@@ -345,11 +345,11 @@ describe("PayPal failure handling", () => {
     await expect(wf.confirmAuthorization("milestone-1", orderId)).rejects.toThrow(
       /DENIED/,
     );
-    const m = milestone("milestone-1");
+    const m = await milestone("milestone-1");
     expect(m.state).toBe("DRAFT");
     expect(m.paypalAuthorizationId).toBeNull();
     expect(m.paypalOrderId).toBe(orderId);
-    expect(getState().events.map((e) => e.action)).toContain("authorize_failed");
+    expect((await getState()).events.map((e) => e.action)).toContain("authorize_failed");
   });
 
   it("non-COMPLETED capture status escalates with no capture id or ledger row", async () => {
@@ -357,12 +357,12 @@ describe("PayPal failure handling", () => {
     fake.statuses.capture = "PENDING";
 
     await expect(wf.decide("milestone-1")).rejects.toThrow(/PENDING/);
-    const m = milestone("milestone-1");
+    const m = await milestone("milestone-1");
     expect(m.state).toBe("ESCALATED");
     expect(m.paypalCaptureId).toBeNull();
-    expect(getState().ledger).toHaveLength(0);
-    expect(getState().events.map((e) => e.action)).toContain("capture_failed");
-    expect(getState().events.map((e) => e.action)).not.toContain("released");
+    expect((await getState()).ledger).toHaveLength(0);
+    expect((await getState()).events.map((e) => e.action)).toContain("capture_failed");
+    expect((await getState()).events.map((e) => e.action)).not.toContain("released");
   });
 
   it("capture failure during decide leaves ESCALATED with no ledger row, then approveCapture recovers", async () => {
@@ -370,17 +370,17 @@ describe("PayPal failure handling", () => {
     fake.flags.failCapture = true;
 
     await expect(wf.decide("milestone-1")).rejects.toThrow("paypal capture failed");
-    const m = milestone("milestone-1");
+    const m = await milestone("milestone-1");
     expect(m.state).toBe("ESCALATED");
     expect(m.paypalCaptureId).toBeNull();
-    expect(getState().ledger).toHaveLength(0);
-    expect(getState().events.map((e) => e.action)).toContain("capture_failed");
+    expect((await getState()).ledger).toHaveLength(0);
+    expect((await getState()).events.map((e) => e.action)).toContain("capture_failed");
 
     fake.flags.failCapture = false;
     await wf.approveCapture("milestone-1");
-    expect(milestone("milestone-1").state).toBe("RELEASED");
-    expect(getState().ledger).toHaveLength(1);
-    expect(getState().ledger[0].amountCents).toBe(20000);
+    expect((await milestone("milestone-1")).state).toBe("RELEASED");
+    expect((await getState()).ledger).toHaveLength(1);
+    expect((await getState()).ledger[0].amountCents).toBe(20000);
   });
 });
 
@@ -388,7 +388,7 @@ describe("terminal-state guards (Review Focus 2)", () => {
   it("double decide / approveCapture after RELEASED throws and captures exactly once", async () => {
     await driveToDelivered("milestone-1");
     await wf.decide("milestone-1");
-    expect(milestone("milestone-1").state).toBe("RELEASED");
+    expect((await milestone("milestone-1")).state).toBe("RELEASED");
 
     await expect(wf.decide("milestone-1")).rejects.toThrow();
     await expect(wf.approveCapture("milestone-1")).rejects.toThrow();
@@ -396,8 +396,8 @@ describe("terminal-state guards (Review Focus 2)", () => {
     await expect(wf.rejectVoid("milestone-1")).rejects.toThrow();
 
     expect(fake.paypal.captureAuthorization).toHaveBeenCalledTimes(1);
-    expect(getState().ledger).toHaveLength(1);
-    expect(milestone("milestone-1").paypalCaptureId).toBe("CAP-1");
+    expect((await getState()).ledger).toHaveLength(1);
+    expect((await milestone("milestone-1")).paypalCaptureId).toBe("CAP-1");
   });
 
   it("guards invalid transitions before any PayPal call", async () => {
@@ -417,7 +417,7 @@ describe("terminal-state guards (Review Focus 2)", () => {
 
     expect(fake.paypal.captureAuthorization).not.toHaveBeenCalled();
     expect(fake.paypal.voidAuthorization).not.toHaveBeenCalled();
-    expect(getState().ledger).toHaveLength(0);
+    expect((await getState()).ledger).toHaveLength(0);
   });
 });
 
@@ -425,16 +425,16 @@ describe("updatePolicy and rerunPolicy", () => {
   it("policy edits never auto re-run; explicit rerunPolicy re-evaluates and may auto-capture", async () => {
     await driveToDelivered("milestone-2");
     await wf.decide("milestone-2");
-    expect(milestone("milestone-2").state).toBe("ESCALATED");
+    expect((await milestone("milestone-2")).state).toBe("ESCALATED");
 
     await wf.updatePolicy({ autoPayLimitCents: 60000 });
 
     // Edit alone changes nothing about the milestone.
-    expect(milestone("milestone-2").state).toBe("ESCALATED");
+    expect((await milestone("milestone-2")).state).toBe("ESCALATED");
     expect(fake.paypal.captureAuthorization).not.toHaveBeenCalled();
-    expect(getState().project.autoPayLimitCents).toBe(60000);
+    expect((await getState()).project.autoPayLimitCents).toBe(60000);
 
-    const updated = getState().events.find((e) => e.action === "policy_updated");
+    const updated = (await getState()).events.find((e) => e.action === "policy_updated");
     expect(updated).toBeDefined();
     expect(JSON.parse(updated!.detail)).toEqual({
       budgetCapCents: 100000,
@@ -444,14 +444,14 @@ describe("updatePolicy and rerunPolicy", () => {
 
     const result = await wf.rerunPolicy("milestone-2");
     expect(result).toEqual({ action: "AUTO_CAPTURE" });
-    expect(milestone("milestone-2").state).toBe("RELEASED");
-    expect(getState().ledger[0].amountCents).toBe(60000);
+    expect((await milestone("milestone-2")).state).toBe("RELEASED");
+    expect((await getState()).ledger[0].amountCents).toBe(60000);
   });
 
   it("rerunPolicy from VERIFIED escalates when the current policy fails", async () => {
     await driveToDelivered("milestone-1");
-    updateMilestone("milestone-1", { state: "VERIFIED" });
-    insertVerification({
+    await updateMilestone("milestone-1", { state: "VERIFIED" });
+    await insertVerification({
       milestoneId: "milestone-1",
       provider: "fallback",
       items: [],
@@ -461,7 +461,7 @@ describe("updatePolicy and rerunPolicy", () => {
 
     const result = await wf.rerunPolicy("milestone-1");
     expect(result).toEqual({ action: "ESCALATE" });
-    expect(milestone("milestone-1").state).toBe("ESCALATED");
+    expect((await milestone("milestone-1")).state).toBe("ESCALATED");
     expect(fake.paypal.captureAuthorization).not.toHaveBeenCalled();
   });
 });
@@ -469,12 +469,12 @@ describe("updatePolicy and rerunPolicy", () => {
 describe("resetDemoFlow", () => {
   it("voids a live authorization and reseeds the demo", async () => {
     const orderId = await driveToDelivered("milestone-1");
-    expect(milestone("milestone-1").state).toBe("DELIVERED");
+    expect((await milestone("milestone-1")).state).toBe("DELIVERED");
 
     await wf.resetDemoFlow();
 
     expect(fake.paypal.voidAuthorization).toHaveBeenCalledWith(`AUTH-${orderId}`);
-    const state = getState();
+    const state = await getState();
     expect(state.milestones.map((m) => m.state)).toEqual(["DRAFT", "DRAFT"]);
     expect(state.deliverables).toHaveLength(0);
     expect(state.ledger).toHaveLength(0);
@@ -484,12 +484,12 @@ describe("resetDemoFlow", () => {
   it("void failure still reseeds and logs the failure", async () => {
     await driveToDelivered("milestone-2");
     await wf.decide("milestone-2");
-    expect(milestone("milestone-2").state).toBe("ESCALATED");
+    expect((await milestone("milestone-2")).state).toBe("ESCALATED");
     fake.flags.failVoid = true;
 
     await expect(wf.resetDemoFlow()).resolves.toBeUndefined();
 
-    const state = getState();
+    const state = await getState();
     expect(state.milestones.map((m) => m.state)).toEqual(["DRAFT", "DRAFT"]);
     const reset = state.events.find((e) => e.action === "demo_reset");
     expect(reset?.detail).toContain("paypal void failed");
@@ -509,17 +509,17 @@ describe("concurrency (in-flight guard)", () => {
     expect(results.filter((r) => r.status === "fulfilled")).toHaveLength(1);
     expect(results.filter((r) => r.status === "rejected")).toHaveLength(1);
     expect(slowFake.paypal.captureAuthorization).toHaveBeenCalledTimes(1);
-    expect(getState().ledger).toHaveLength(1);
-    expect(getState().ledger[0].amountCents).toBe(20000);
-    expect(milestone("milestone-1").state).toBe("RELEASED");
-    expect(milestone("milestone-1").paypalCaptureId).toBe("CAP-1");
+    expect((await getState()).ledger).toHaveLength(1);
+    expect((await getState()).ledger[0].amountCents).toBe(20000);
+    expect((await milestone("milestone-1")).state).toBe("RELEASED");
+    expect((await milestone("milestone-1")).paypalCaptureId).toBe("CAP-1");
   });
 
   it("two concurrent approveCapture calls on one milestone capture exactly once", async () => {
     const { slowWf, slowFake } = makeSlowWorkflow();
     await driveToDelivered("milestone-2", slowWf);
     await slowWf.decide("milestone-2");
-    expect(milestone("milestone-2").state).toBe("ESCALATED");
+    expect((await milestone("milestone-2")).state).toBe("ESCALATED");
 
     const results = await Promise.allSettled([
       slowWf.approveCapture("milestone-2"),
@@ -529,8 +529,8 @@ describe("concurrency (in-flight guard)", () => {
     expect(results.filter((r) => r.status === "fulfilled")).toHaveLength(1);
     expect(results.filter((r) => r.status === "rejected")).toHaveLength(1);
     expect(slowFake.paypal.captureAuthorization).toHaveBeenCalledTimes(1);
-    expect(getState().ledger).toHaveLength(1);
-    expect(milestone("milestone-2").state).toBe("RELEASED");
+    expect((await getState()).ledger).toHaveLength(1);
+    expect((await milestone("milestone-2")).state).toBe("RELEASED");
   });
 
   it("concurrent approvals on different milestones cannot jointly breach the budget cap", async () => {
@@ -538,8 +538,8 @@ describe("concurrency (in-flight guard)", () => {
     await driveToDelivered("milestone-1", slowWf);
     await driveToDelivered("milestone-2", slowWf);
     // Both in review; each alone fits a 70000 cap, together 80000 does not.
-    updateMilestone("milestone-1", { state: "ESCALATED" });
-    updateMilestone("milestone-2", { state: "ESCALATED" });
+    await updateMilestone("milestone-1", { state: "ESCALATED" });
+    await updateMilestone("milestone-2", { state: "ESCALATED" });
     await slowWf.updatePolicy({ budgetCapCents: 70000 });
 
     const results = await Promise.allSettled([
@@ -554,10 +554,10 @@ describe("concurrency (in-flight guard)", () => {
       (rejected as PromiseRejectedResult | undefined)?.reason,
     ).toBeInstanceOf(PolicyBlocked);
     expect(slowFake.paypal.captureAuthorization).toHaveBeenCalledTimes(1);
-    expect(getState().ledger).toHaveLength(1);
-    expect(capturedTotalCents(getState().project.id)).toBeLessThanOrEqual(70000);
+    expect((await getState()).ledger).toHaveLength(1);
+    expect(await capturedTotalCents((await getState()).project.id)).toBeLessThanOrEqual(70000);
     expect(
-      getState()
+      (await getState())
         .milestones.map((m) => m.state)
         .sort(),
     ).toEqual(["ESCALATED", "RELEASED"]);
@@ -567,7 +567,8 @@ describe("concurrency (in-flight guard)", () => {
 describe("post-capture write failure (atomic release)", () => {
   it("stays CAPTURED with the original error, then resumes release-only without re-capturing", async () => {
     await driveToDelivered("milestone-1");
-    getDb().exec(
+    const client = await getClient();
+    await client.execute(
       `CREATE TRIGGER fail_ledger_insert
        BEFORE INSERT ON ledger_entries
        BEGIN SELECT RAISE(ABORT, 'injected ledger failure'); END;`,
@@ -579,21 +580,21 @@ describe("post-capture write failure (atomic release)", () => {
         "injected ledger failure",
       );
     } finally {
-      getDb().exec("DROP TRIGGER IF EXISTS fail_ledger_insert");
+      await client.execute("DROP TRIGGER IF EXISTS fail_ledger_insert");
     }
 
-    const captured = milestone("milestone-1");
+    const captured = await milestone("milestone-1");
     expect(captured.state).toBe("CAPTURED");
     expect(captured.paypalCaptureId).toBe("CAP-1");
-    expect(getState().ledger).toHaveLength(0);
+    expect((await getState()).ledger).toHaveLength(0);
     expect(fake.paypal.captureAuthorization).toHaveBeenCalledTimes(1);
 
     // Resume from CAPTURED: release only, no second PayPal capture.
     await wf.approveCapture("milestone-1");
-    expect(milestone("milestone-1").state).toBe("RELEASED");
-    expect(getState().ledger).toHaveLength(1);
-    expect(getState().ledger[0].amountCents).toBe(20000);
+    expect((await milestone("milestone-1")).state).toBe("RELEASED");
+    expect((await getState()).ledger).toHaveLength(1);
+    expect((await getState()).ledger[0].amountCents).toBe(20000);
     expect(fake.paypal.captureAuthorization).toHaveBeenCalledTimes(1);
-    expect(getState().events.map((e) => e.action)).toContain("released");
+    expect((await getState()).events.map((e) => e.action)).toContain("released");
   });
 });

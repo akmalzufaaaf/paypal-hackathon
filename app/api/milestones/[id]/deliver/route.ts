@@ -17,7 +17,7 @@ export async function POST(
     const milestoneId = parseMilestoneId((await params).id);
     const input = parseDeliverableBody(await readJsonBody(req));
     await submitDeliverable(milestoneId, input);
-    return okResponse();
+    return await okResponse();
   } catch (err) {
     return errorResponse(err);
   }

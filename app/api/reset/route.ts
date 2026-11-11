@@ -11,7 +11,7 @@ export async function POST(req: Request) {
     await requestTime();
     await readOptionalJsonBody(req);
     await resetDemoFlow();
-    return okResponse();
+    return await okResponse();
   } catch (err) {
     return errorResponse(err);
   }

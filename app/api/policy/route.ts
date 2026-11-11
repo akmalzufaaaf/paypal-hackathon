@@ -12,7 +12,7 @@ export async function PATCH(req: Request) {
     await requestTime();
     const patch = parsePolicyBody(await readJsonBody(req));
     await updatePolicy(patch);
-    return okResponse();
+    return await okResponse();
   } catch (err) {
     return errorResponse(err);
   }

@@ -1,6 +1,6 @@
 import { beforeEach, describe, expect, it } from "vitest";
 
-// Must be set before any getDb() call; repo/db open the DB lazily.
+// Must be set before any getClient() call; repo/db open the DB lazily.
 process.env.RILIS_DB_PATH = ":memory:";
 
 import {
@@ -9,7 +9,7 @@ import {
   MILESTONE2_CHECKLIST,
   SAMPLE_DELIVERABLE_NOTE,
 } from "../lib/constants";
-import { getDb } from "../lib/db";
+import { getClient } from "../lib/db";
 import {
   capturedTotalCents,
   getState,
@@ -21,13 +21,13 @@ import {
   updateMilestone,
 } from "../lib/repo";
 
-beforeEach(() => {
-  resetDemo();
+beforeEach(async () => {
+  await resetDemo();
 });
 
 describe("seed", () => {
-  it("creates exactly one project with the brief's exact fields and DEMO policy", () => {
-    const { project, milestones } = getState();
+  it("creates exactly one project with the brief's exact fields and DEMO policy", async () => {
+    const { project, milestones } = await getState();
     expect(project.title).toBe("Brand logo for Sarah's coffee startup");
     expect(project.clientName).toBe("Sarah (Austin, US)");
     expect(project.freelancerName).toBe("Bima (Yogyakarta, ID)");
@@ -37,8 +37,8 @@ describe("seed", () => {
     expect(milestones).toHaveLength(2);
   });
 
-  it("seeds Milestone 1 at 20000 and Milestone 2 at 60000, both DRAFT", () => {
-    const { milestones } = getState();
+  it("seeds Milestone 1 at 20000 and Milestone 2 at 60000, both DRAFT", async () => {
+    const { milestones } = await getState();
     const [m1, m2] = milestones;
     expect(m1.title).toBe("Primary logo concepts");
     expect(m1.amountCents).toBe(20000);
@@ -48,8 +48,8 @@ describe("seed", () => {
     expect(m2.state).toBe("DRAFT");
   });
 
-  it("seeds 5-item checklists from lib/constants, stored per milestone", () => {
-    const { milestones } = getState();
+  it("seeds 5-item checklists from lib/constants, stored per milestone", async () => {
+    const { milestones } = await getState();
     expect(MILESTONE1_CHECKLIST).toHaveLength(5);
     expect(MILESTONE2_CHECKLIST).toHaveLength(5);
     expect(milestones[0].checklist).toEqual(MILESTONE1_CHECKLIST);
@@ -58,8 +58,8 @@ describe("seed", () => {
     expect(milestones[1].brief.length).toBeGreaterThan(0);
   });
 
-  it("seeds PayPal id fields as null", () => {
-    const { milestones } = getState();
+  it("seeds PayPal id fields as null", async () => {
+    const { milestones } = await getState();
     for (const m of milestones) {
       expect(m.paypalOrderId).toBeNull();
       expect(m.paypalAuthorizationId).toBeNull();
@@ -71,7 +71,7 @@ describe("seed", () => {
 });
 
 describe("seeded checklist + sample deliverable (deterministic fallback contract)", () => {
-  it("sample note covers exactly 4 of the 5 Milestone-1 requirements by distinctive keyword", () => {
+  it("sample note covers exactly 4 of the 5 Milestone-1 requirements by distinctive keyword", async () => {
     const note = SAMPLE_DELIVERABLE_NOTE.toLowerCase();
     // Covered: logo, coffee, vector/SVG, colour palette
     expect(note).toContain("logo");
@@ -93,7 +93,7 @@ describe("seeded checklist + sample deliverable (deterministic fallback contract
     }
   });
 
-  it("every Milestone-1 checklist item carries its distinctive keyword", () => {
+  it("every Milestone-1 checklist item carries its distinctive keyword", async () => {
     const items = MILESTONE1_CHECKLIST.map((s) => s.toLowerCase());
     expect(items.some((s) => s.includes("logo"))).toBe(true);
     expect(items.some((s) => s.includes("coffee"))).toBe(true);
@@ -104,31 +104,31 @@ describe("seeded checklist + sample deliverable (deterministic fallback contract
 });
 
 describe("capturedTotalCents", () => {
-  it("is 0 on the seed", () => {
-    const { project } = getState();
-    expect(capturedTotalCents(project.id)).toBe(0);
+  it("is 0 on the seed", async () => {
+    const { project } = await getState();
+    expect(await capturedTotalCents(project.id)).toBe(0);
   });
 
-  it("sums only milestones in CAPTURED or RELEASED state", () => {
-    const { project, milestones } = getState();
+  it("sums only milestones in CAPTURED or RELEASED state", async () => {
+    const { project, milestones } = await getState();
     const [m1, m2] = milestones;
 
-    updateMilestone(m1.id, { state: "AUTHORIZED" });
-    updateMilestone(m2.id, { state: "ESCALATED" });
-    expect(capturedTotalCents(project.id)).toBe(0);
+    await updateMilestone(m1.id, { state: "AUTHORIZED" });
+    await updateMilestone(m2.id, { state: "ESCALATED" });
+    expect(await capturedTotalCents(project.id)).toBe(0);
 
-    updateMilestone(m1.id, { state: "CAPTURED" });
-    expect(capturedTotalCents(project.id)).toBe(20000);
+    await updateMilestone(m1.id, { state: "CAPTURED" });
+    expect(await capturedTotalCents(project.id)).toBe(20000);
 
-    updateMilestone(m2.id, { state: "RELEASED" });
-    expect(capturedTotalCents(project.id)).toBe(80000);
+    await updateMilestone(m2.id, { state: "RELEASED" });
+    expect(await capturedTotalCents(project.id)).toBe(80000);
   });
 });
 
 describe("repository writes", () => {
-  it("updateMilestone persists state and PayPal ids", () => {
-    const { milestones } = getState();
-    const updated = updateMilestone(milestones[0].id, {
+  it("updateMilestone persists state and PayPal ids", async () => {
+    const { milestones } = await getState();
+    const updated = await updateMilestone(milestones[0].id, {
       state: "AUTHORIZED",
       paypalOrderId: "ORDER-1",
       paypalAuthorizationId: "AUTH-1",
@@ -137,23 +137,23 @@ describe("repository writes", () => {
     expect(updated.paypalOrderId).toBe("ORDER-1");
     expect(updated.paypalAuthorizationId).toBe("AUTH-1");
 
-    const reread = getState().milestones[0];
+    const reread = (await getState()).milestones[0];
     expect(reread.state).toBe("AUTHORIZED");
     expect(reread.paypalAuthorizationId).toBe("AUTH-1");
   });
 
-  it("updateMilestone persists fundingAttemptId through the patch surface", () => {
-    const { milestones } = getState();
-    const updated = updateMilestone(milestones[0].id, {
+  it("updateMilestone persists fundingAttemptId through the patch surface", async () => {
+    const { milestones } = await getState();
+    const updated = await updateMilestone(milestones[0].id, {
       fundingAttemptId: "attempt-123",
     });
     expect(updated.fundingAttemptId).toBe("attempt-123");
-    expect(getState().milestones[0].fundingAttemptId).toBe("attempt-123");
+    expect((await getState()).milestones[0].fundingAttemptId).toBe("attempt-123");
   });
 
-  it("insertDeliverable round-trips through getState", () => {
-    const { milestones } = getState();
-    const saved = insertDeliverable({
+  it("insertDeliverable round-trips through getState", async () => {
+    const { milestones } = await getState();
+    const saved = await insertDeliverable({
       milestoneId: milestones[0].id,
       note: SAMPLE_DELIVERABLE_NOTE,
       link: "https://example.com/logo-v1",
@@ -161,14 +161,14 @@ describe("repository writes", () => {
     expect(saved.milestoneId).toBe(milestones[0].id);
     expect(saved.note).toBe(SAMPLE_DELIVERABLE_NOTE);
 
-    const state = getState();
+    const state = await getState();
     expect(state.deliverables).toHaveLength(1);
     expect(state.deliverables[0].note).toBe(SAMPLE_DELIVERABLE_NOTE);
     expect(state.deliverables[0].link).toBe("https://example.com/logo-v1");
   });
 
-  it("insertVerification stores items as JSON and returns them parsed", () => {
-    const { milestones } = getState();
+  it("insertVerification stores items as JSON and returns them parsed", async () => {
+    const { milestones } = await getState();
     const items = [
       {
         requirement: MILESTONE1_CHECKLIST[0],
@@ -176,7 +176,7 @@ describe("repository writes", () => {
         evidence: "note mentions logo concepts",
       },
     ];
-    const saved = insertVerification({
+    const saved = await insertVerification({
       milestoneId: milestones[0].id,
       provider: "fallback",
       items,
@@ -186,27 +186,27 @@ describe("repository writes", () => {
     expect(saved.items).toEqual(items);
     expect(saved.score).toBe(80);
 
-    const state = getState();
+    const state = await getState();
     expect(state.verifications).toHaveLength(1);
     expect(state.verifications[0].items).toEqual(items);
   });
 
-  it("insertLedgerRelease records a simulated release entry", () => {
-    const { milestones } = getState();
-    const entry = insertLedgerRelease(milestones[0].id, 20000);
+  it("insertLedgerRelease records a simulated release entry", async () => {
+    const { milestones } = await getState();
+    const entry = await insertLedgerRelease(milestones[0].id, 20000);
     expect(entry.milestoneId).toBe(milestones[0].id);
     expect(entry.amountCents).toBe(20000);
     expect(entry.kind).toBe("release");
     expect(entry.status).toBe("simulated");
-    expect(getState().ledger).toHaveLength(1);
+    expect((await getState()).ledger).toHaveLength(1);
   });
 
-  it("insertEvent returns events newest-last (chronological order)", () => {
-    const { milestones } = getState();
-    insertEvent(milestones[0].id, "client", "funded", "order ORDER-1");
-    insertEvent(milestones[0].id, "agent", "verified", "score 80");
+  it("insertEvent returns events newest-last (chronological order)", async () => {
+    const { milestones } = await getState();
+    await insertEvent(milestones[0].id, "client", "funded", "order ORDER-1");
+    await insertEvent(milestones[0].id, "agent", "verified", "score 80");
 
-    const { events } = getState();
+    const { events } = await getState();
     expect(events.map((e) => e.action)).toEqual(["funded", "verified"]);
     expect(events[events.length - 1].action).toBe("verified");
     expect(events[0].actor).toBe("client");
@@ -214,37 +214,37 @@ describe("repository writes", () => {
 });
 
 describe("resetDemo", () => {
-  it("clears all tables and returns state to the seed", () => {
-    const before = getState();
+  it("clears all tables and returns state to the seed", async () => {
+    const before = await getState();
     const [m1] = before.milestones;
-    updateMilestone(m1.id, { state: "RELEASED", paypalCaptureId: "CAP-1" });
-    insertDeliverable({ milestoneId: m1.id, note: "work" });
-    insertVerification({
+    await updateMilestone(m1.id, { state: "RELEASED", paypalCaptureId: "CAP-1" });
+    await insertDeliverable({ milestoneId: m1.id, note: "work" });
+    await insertVerification({
       milestoneId: m1.id,
       provider: "fallback",
       items: [],
       score: 0,
       summary: "n/a",
     });
-    insertLedgerRelease(m1.id, 20000);
-    insertEvent(m1.id, "agent", "released", "capture CAP-1");
-    expect(getState().deliverables).toHaveLength(1);
+    await insertLedgerRelease(m1.id, 20000);
+    await insertEvent(m1.id, "agent", "released", "capture CAP-1");
+    expect((await getState()).deliverables).toHaveLength(1);
 
-    resetDemo();
+    await resetDemo();
 
-    const after = getState();
+    const after = await getState();
     expect(after.project).toEqual(before.project);
     expect(after.milestones).toEqual(before.milestones);
     expect(after.deliverables).toEqual([]);
     expect(after.verifications).toEqual([]);
     expect(after.ledger).toEqual([]);
     expect(after.events).toEqual([]);
-    expect(capturedTotalCents(after.project.id)).toBe(0);
+    expect(await capturedTotalCents(after.project.id)).toBe(0);
   });
 });
 
-describe("getDb", () => {
-  it("returns the same connection for the same path", () => {
-    expect(getDb()).toBe(getDb());
+describe("getClient", () => {
+  it("returns the same client for the same path", async () => {
+    expect(await getClient()).toBe(await getClient());
   });
 });

@@ -17,7 +17,7 @@ export async function POST(req: Request) {
     );
     const orderId = requireStringField(body, "orderId");
     await confirmAuthorization(milestoneId, orderId);
-    return okResponse();
+    return await okResponse();
   } catch (err) {
     return errorResponse(err);
   }

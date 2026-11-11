@@ -16,7 +16,7 @@ export async function POST(req: Request) {
       requireStringField(body, "milestoneId"),
     );
     const { orderId } = await fundMilestone(milestoneId);
-    return okResponse({ orderId });
+    return await okResponse({ orderId });
   } catch (err) {
     return errorResponse(err);
   }

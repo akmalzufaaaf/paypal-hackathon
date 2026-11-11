@@ -19,7 +19,6 @@
 
 import { randomUUID } from "node:crypto";
 
-import { getDb } from "./db";
 import {
   authorizeOrder,
   captureAuthorization,
@@ -29,13 +28,14 @@ import {
 import { evaluatePolicy } from "./policy";
 import {
   capturedTotalCents,
+  completeRelease,
   getState,
   insertDeliverable,
   insertEvent,
-  insertLedgerRelease,
   insertVerification,
   resetDemo,
   updateMilestone,
+  updateProjectPolicy,
   type Deliverable,
   type Milestone,
   type Project,
@@ -138,20 +138,22 @@ export function createWorkflow(deps: Partial<WorkflowDeps> = {}) {
     return result;
   }
 
-  function getMilestone(milestoneId: string): Milestone {
-    const milestone = getState().milestones.find((m) => m.id === milestoneId);
+  async function getMilestone(milestoneId: string): Promise<Milestone> {
+    const milestone = (await getState()).milestones.find(
+      (m) => m.id === milestoneId,
+    );
     if (!milestone) {
       throw new Error(`milestone not found: ${milestoneId}`);
     }
     return milestone;
   }
 
-  function getProject(): Project {
-    return getState().project;
+  async function getProject(): Promise<Project> {
+    return (await getState()).project;
   }
 
   /** Guarded state change: the only path that mutates milestone state. */
-  function transitionTo(
+  async function transitionTo(
     milestone: Milestone,
     to: MilestoneState,
     patch: {
@@ -159,10 +161,10 @@ export function createWorkflow(deps: Partial<WorkflowDeps> = {}) {
       paypalAuthorizationId?: string;
       paypalCaptureId?: string;
     } = {},
-  ): Milestone {
+  ): Promise<Milestone> {
     // Re-read the persisted row: never trust a snapshot taken before an
     // await (verifier / PayPal), even though mutations are serialized.
-    const current = getMilestone(milestone.id);
+    const current = await getMilestone(milestone.id);
     if (current.state !== milestone.state) {
       throw new InvalidTransitionError(
         `Stale state for milestone ${milestone.id}: expected ${milestone.state}, found ${current.state}`,
@@ -173,15 +175,23 @@ export function createWorkflow(deps: Partial<WorkflowDeps> = {}) {
         `Invalid transition ${current.state} -> ${to} for milestone ${milestone.id}`,
       );
     }
-    return updateMilestone(milestone.id, { state: to, ...patch });
+    return await updateMilestone(milestone.id, { state: to, ...patch });
   }
 
-  function latestDeliverable(milestoneId: string): Deliverable | undefined {
-    return getState().deliverables.filter((d) => d.milestoneId === milestoneId).at(-1);
+  async function latestDeliverable(
+    milestoneId: string,
+  ): Promise<Deliverable | undefined> {
+    return (await getState()).deliverables
+      .filter((d) => d.milestoneId === milestoneId)
+      .at(-1);
   }
 
-  function latestVerification(milestoneId: string): Verification | undefined {
-    return getState().verifications.filter((v) => v.milestoneId === milestoneId).at(-1);
+  async function latestVerification(
+    milestoneId: string,
+  ): Promise<Verification | undefined> {
+    return (await getState()).verifications
+      .filter((v) => v.milestoneId === milestoneId)
+      .at(-1);
   }
 
   function policySnapshot(project: Project) {
@@ -197,23 +207,11 @@ export function createWorkflow(deps: Partial<WorkflowDeps> = {}) {
    * them persist, or the milestone stays CAPTURED with its capture ID stored
    * and no ledger row — resumable without ever re-capturing.
    */
-  function releaseAtomically(captured: Milestone, actor: string): void {
-    getDb().transaction(() => {
-      transitionTo(captured, "RELEASED");
-      insertLedgerRelease(captured.id, captured.amountCents);
-      insertEvent(
-        captured.id,
-        actor,
-        "captured",
-        `Captured authorization ${captured.paypalAuthorizationId} as capture ${captured.paypalCaptureId} for ${captured.amountCents} cents.`,
-      );
-      insertEvent(
-        captured.id,
-        actor,
-        "released",
-        `Released ${captured.amountCents} cents for milestone ${captured.id} (simulated payout, capture ${captured.paypalCaptureId}).`,
-      );
-    })();
+  async function releaseAtomically(
+    captured: Milestone,
+    actor: string,
+  ): Promise<void> {
+    await completeRelease(captured, actor);
   }
 
   /**
@@ -223,12 +221,12 @@ export function createWorkflow(deps: Partial<WorkflowDeps> = {}) {
    * The caller owns failure handling via `handleCaptureFailure`.
    */
   async function captureAndRelease(milestoneId: string, actor: string): Promise<void> {
-    const milestone = getMilestone(milestoneId);
+    const milestone = await getMilestone(milestoneId);
     if (milestone.state === "CAPTURED") {
       if (!milestone.paypalCaptureId) {
         throw new Error(`milestone ${milestoneId} is CAPTURED without a capture id`);
       }
-      releaseAtomically(milestone, actor);
+      await releaseAtomically(milestone, actor);
       return;
     }
     if (!milestone.paypalAuthorizationId) {
@@ -244,8 +242,10 @@ export function createWorkflow(deps: Partial<WorkflowDeps> = {}) {
       );
     }
     // Persist the capture ID first; the release that follows is transactional.
-    const captured = transitionTo(milestone, "CAPTURED", { paypalCaptureId: captureId });
-    releaseAtomically(captured, actor);
+    const captured = await transitionTo(milestone, "CAPTURED", {
+      paypalCaptureId: captureId,
+    });
+    await releaseAtomically(captured, actor);
   }
 
   /**
@@ -254,15 +254,15 @@ export function createWorkflow(deps: Partial<WorkflowDeps> = {}) {
    * ESCALATED unpaid; post-capture local failure stays CAPTURED — CAPTURED
    * has no escalation edge and must never be re-captured.
    */
-  function handleCaptureFailure(
+  async function handleCaptureFailure(
     milestoneId: string,
     actor: string,
     context: string,
     err: unknown,
-  ): never {
-    const current = getMilestone(milestoneId);
+  ): Promise<never> {
+    const current = await getMilestone(milestoneId);
     if (current.state === "CAPTURED") {
-      insertEvent(
+      await insertEvent(
         milestoneId,
         actor,
         "capture_failed",
@@ -270,9 +270,9 @@ export function createWorkflow(deps: Partial<WorkflowDeps> = {}) {
       );
     } else {
       if (current.state === "VERIFIED") {
-        transitionTo(current, "ESCALATED");
+        await transitionTo(current, "ESCALATED");
       }
-      insertEvent(
+      await insertEvent(
         milestoneId,
         actor,
         "capture_failed",
@@ -283,7 +283,7 @@ export function createWorkflow(deps: Partial<WorkflowDeps> = {}) {
   }
 
   async function fundMilestone(milestoneId: string): Promise<{ orderId: string }> {
-    const milestone = getMilestone(milestoneId);
+    const milestone = await getMilestone(milestoneId);
     if (milestone.state !== "DRAFT") {
       throw new InvalidTransitionError(
         `fundMilestone requires DRAFT, got ${milestone.state} for milestone ${milestoneId}`,
@@ -299,7 +299,7 @@ export function createWorkflow(deps: Partial<WorkflowDeps> = {}) {
     // a forever-static key would replay the pre-Reset order after Reset.
     const attemptId = milestone.fundingAttemptId ?? randomUUID();
     if (!milestone.fundingAttemptId) {
-      updateMilestone(milestoneId, { fundingAttemptId: attemptId });
+      await updateMilestone(milestoneId, { fundingAttemptId: attemptId });
     }
     const requestId = `${milestoneId}:create-order:${attemptId}`;
     let orderId: string;
@@ -310,7 +310,7 @@ export function createWorkflow(deps: Partial<WorkflowDeps> = {}) {
         requestId,
       ));
     } catch (err) {
-      insertEvent(
+      await insertEvent(
         milestoneId,
         "client",
         "order_failed",
@@ -318,8 +318,8 @@ export function createWorkflow(deps: Partial<WorkflowDeps> = {}) {
       );
       throw err;
     }
-    updateMilestone(milestoneId, { paypalOrderId: orderId });
-    insertEvent(
+    await updateMilestone(milestoneId, { paypalOrderId: orderId });
+    await insertEvent(
       milestoneId,
       "client",
       "order_created",
@@ -329,7 +329,7 @@ export function createWorkflow(deps: Partial<WorkflowDeps> = {}) {
   }
 
   async function confirmAuthorization(milestoneId: string, orderId: string): Promise<void> {
-    const milestone = getMilestone(milestoneId);
+    const milestone = await getMilestone(milestoneId);
     if (!canTransition(milestone.state, "AUTHORIZED")) {
       throw new InvalidTransitionError(
         `Invalid transition ${milestone.state} -> AUTHORIZED for milestone ${milestoneId}`,
@@ -353,7 +353,7 @@ export function createWorkflow(deps: Partial<WorkflowDeps> = {}) {
       }
       authorizationId = result.authorizationId;
     } catch (err) {
-      insertEvent(
+      await insertEvent(
         milestoneId,
         "client",
         "authorize_failed",
@@ -361,11 +361,11 @@ export function createWorkflow(deps: Partial<WorkflowDeps> = {}) {
       );
       throw err;
     }
-    transitionTo(milestone, "AUTHORIZED", {
+    await transitionTo(milestone, "AUTHORIZED", {
       paypalOrderId: orderId,
       paypalAuthorizationId: authorizationId,
     });
-    insertEvent(
+    await insertEvent(
       milestoneId,
       "client",
       "authorized",
@@ -377,7 +377,7 @@ export function createWorkflow(deps: Partial<WorkflowDeps> = {}) {
     milestoneId: string,
     input: SubmitDeliverableInput,
   ): Promise<void> {
-    const milestone = getMilestone(milestoneId);
+    const milestone = await getMilestone(milestoneId);
     if (!canTransition(milestone.state, "DELIVERED")) {
       throw new InvalidTransitionError(
         `Invalid transition ${milestone.state} -> DELIVERED for milestone ${milestoneId}`,
@@ -386,7 +386,7 @@ export function createWorkflow(deps: Partial<WorkflowDeps> = {}) {
     if (!input || typeof input.note !== "string") {
       throw new Error("a delivery note is required");
     }
-    insertDeliverable({
+    await insertDeliverable({
       milestoneId,
       kind: input.kind ?? "note",
       filename: input.filename ?? null,
@@ -394,8 +394,8 @@ export function createWorkflow(deps: Partial<WorkflowDeps> = {}) {
       note: input.note,
       extractedText: input.extractedText ?? "",
     });
-    transitionTo(milestone, "DELIVERED");
-    insertEvent(
+    await transitionTo(milestone, "DELIVERED");
+    await insertEvent(
       milestoneId,
       "freelancer",
       "delivered",
@@ -404,13 +404,13 @@ export function createWorkflow(deps: Partial<WorkflowDeps> = {}) {
   }
 
   async function decide(milestoneId: string): Promise<{ action: PolicyAction }> {
-    const milestone = getMilestone(milestoneId);
+    const milestone = await getMilestone(milestoneId);
     if (!canTransition(milestone.state, "VERIFIED")) {
       throw new InvalidTransitionError(
         `Invalid transition ${milestone.state} -> VERIFIED for milestone ${milestoneId}`,
       );
     }
-    const deliverable = latestDeliverable(milestoneId);
+    const deliverable = await latestDeliverable(milestoneId);
     if (!deliverable) {
       throw new Error(`milestone ${milestoneId} has no deliverable to verify`);
     }
@@ -420,34 +420,34 @@ export function createWorkflow(deps: Partial<WorkflowDeps> = {}) {
       extractedText: deliverable.extractedText,
       filename: deliverable.filename ?? undefined,
     });
-    insertVerification({
+    await insertVerification({
       milestoneId,
       provider: result.provider,
       items: result.items,
       score: result.score,
       summary: result.summary,
     });
-    const verified = transitionTo(milestone, "VERIFIED");
-    insertEvent(
+    const verified = await transitionTo(milestone, "VERIFIED");
+    await insertEvent(
       milestoneId,
       "agent",
       "verified",
       `Verification (${result.provider}) score ${result.score}: ${result.summary}`,
     );
 
-    const project = getProject();
+    const project = await getProject();
     const policy = evaluatePolicy({
       score: result.score,
       passThreshold: project.passThreshold,
       amountCents: verified.amountCents,
       autoPayLimitCents: project.autoPayLimitCents,
-      capturedTotalCents: capturedTotalCents(project.id),
+      capturedTotalCents: await capturedTotalCents(project.id),
       budgetCapCents: project.budgetCapCents,
     });
 
     if (policy.action === "ESCALATE") {
-      transitionTo(verified, "ESCALATED");
-      insertEvent(
+      await transitionTo(verified, "ESCALATED");
+      await insertEvent(
         milestoneId,
         "agent",
         "escalated",
@@ -459,13 +459,13 @@ export function createWorkflow(deps: Partial<WorkflowDeps> = {}) {
     try {
       await captureAndRelease(milestoneId, "agent");
     } catch (err) {
-      handleCaptureFailure(milestoneId, "agent", "Auto-capture", err);
+      await handleCaptureFailure(milestoneId, "agent", "Auto-capture", err);
     }
     return { action: "AUTO_CAPTURE" };
   }
 
   async function approveCapture(milestoneId: string): Promise<void> {
-    const milestone = getMilestone(milestoneId);
+    const milestone = await getMilestone(milestoneId);
     if (milestone.state === "CAPTURED") {
       // Resume after a post-capture local failure: release only. The cap is
       // not re-checked (this milestone is already counted as captured) and
@@ -473,7 +473,7 @@ export function createWorkflow(deps: Partial<WorkflowDeps> = {}) {
       try {
         await captureAndRelease(milestoneId, "client");
       } catch (err) {
-        handleCaptureFailure(milestoneId, "client", "Release resume", err);
+        await handleCaptureFailure(milestoneId, "client", "Release resume", err);
       }
       return;
     }
@@ -482,10 +482,10 @@ export function createWorkflow(deps: Partial<WorkflowDeps> = {}) {
         `approveCapture requires ESCALATED, got ${milestone.state} for milestone ${milestoneId}`,
       );
     }
-    const project = getProject();
-    const captured = capturedTotalCents(project.id);
+    const project = await getProject();
+    const captured = await capturedTotalCents(project.id);
     if (captured + milestone.amountCents > project.budgetCapCents) {
-      insertEvent(
+      await insertEvent(
         milestoneId,
         "client",
         "capture_blocked",
@@ -498,12 +498,12 @@ export function createWorkflow(deps: Partial<WorkflowDeps> = {}) {
     try {
       await captureAndRelease(milestoneId, "client");
     } catch (err) {
-      handleCaptureFailure(milestoneId, "client", "Approved capture", err);
+      await handleCaptureFailure(milestoneId, "client", "Approved capture", err);
     }
   }
 
   async function rejectVoid(milestoneId: string): Promise<void> {
-    const milestone = getMilestone(milestoneId);
+    const milestone = await getMilestone(milestoneId);
     if (!canTransition(milestone.state, "VOIDED")) {
       throw new InvalidTransitionError(
         `Invalid transition ${milestone.state} -> VOIDED for milestone ${milestoneId}`,
@@ -515,7 +515,7 @@ export function createWorkflow(deps: Partial<WorkflowDeps> = {}) {
     try {
       await paypal.voidAuthorization(milestone.paypalAuthorizationId);
     } catch (err) {
-      insertEvent(
+      await insertEvent(
         milestoneId,
         "client",
         "void_failed",
@@ -523,8 +523,8 @@ export function createWorkflow(deps: Partial<WorkflowDeps> = {}) {
       );
       throw err;
     }
-    transitionTo(milestone, "VOIDED");
-    insertEvent(
+    await transitionTo(milestone, "VOIDED");
+    await insertEvent(
       milestoneId,
       "client",
       "voided",
@@ -533,7 +533,7 @@ export function createWorkflow(deps: Partial<WorkflowDeps> = {}) {
   }
 
   async function rerunPolicy(milestoneId: string): Promise<{ action: PolicyAction }> {
-    const milestone = getMilestone(milestoneId);
+    const milestone = await getMilestone(milestoneId);
     if (
       milestone.state !== "VERIFIED" &&
       milestone.state !== "ESCALATED" &&
@@ -546,7 +546,7 @@ export function createWorkflow(deps: Partial<WorkflowDeps> = {}) {
     if (milestone.state === "CAPTURED") {
       // Resume after a post-capture local failure: release only, no policy
       // re-evaluation and no second PayPal capture.
-      insertEvent(
+      await insertEvent(
         milestoneId,
         "client",
         "policy_rerun",
@@ -555,24 +555,24 @@ export function createWorkflow(deps: Partial<WorkflowDeps> = {}) {
       try {
         await captureAndRelease(milestoneId, "client");
       } catch (err) {
-        handleCaptureFailure(milestoneId, "client", "Release resume", err);
+        await handleCaptureFailure(milestoneId, "client", "Release resume", err);
       }
       return { action: "AUTO_CAPTURE" };
     }
-    const verification = latestVerification(milestoneId);
+    const verification = await latestVerification(milestoneId);
     if (!verification) {
       throw new Error(`milestone ${milestoneId} has no verification to re-evaluate`);
     }
-    const project = getProject();
+    const project = await getProject();
     const policy = evaluatePolicy({
       score: verification.score,
       passThreshold: project.passThreshold,
       amountCents: milestone.amountCents,
       autoPayLimitCents: project.autoPayLimitCents,
-      capturedTotalCents: capturedTotalCents(project.id),
+      capturedTotalCents: await capturedTotalCents(project.id),
       budgetCapCents: project.budgetCapCents,
     });
-    insertEvent(
+    await insertEvent(
       milestoneId,
       "client",
       "policy_rerun",
@@ -581,8 +581,8 @@ export function createWorkflow(deps: Partial<WorkflowDeps> = {}) {
 
     if (policy.action === "ESCALATE") {
       if (milestone.state === "VERIFIED") {
-        transitionTo(milestone, "ESCALATED");
-        insertEvent(
+        await transitionTo(milestone, "ESCALATED");
+        await insertEvent(
           milestoneId,
           "agent",
           "escalated",
@@ -595,13 +595,13 @@ export function createWorkflow(deps: Partial<WorkflowDeps> = {}) {
     try {
       await captureAndRelease(milestoneId, "client");
     } catch (err) {
-      handleCaptureFailure(milestoneId, "client", "Policy re-run capture", err);
+      await handleCaptureFailure(milestoneId, "client", "Policy re-run capture", err);
     }
     return { action: "AUTO_CAPTURE" };
   }
 
   async function updatePolicy(patch: PolicyPatch): Promise<void> {
-    const project = getProject();
+    const project = await getProject();
     const next = {
       budgetCapCents: patch.budgetCapCents ?? project.budgetCapCents,
       autoPayLimitCents: patch.autoPayLimitCents ?? project.autoPayLimitCents,
@@ -612,17 +612,13 @@ export function createWorkflow(deps: Partial<WorkflowDeps> = {}) {
         throw new Error(`invalid policy value for ${key}: ${value}`);
       }
     }
-    getDb()
-      .prepare(
-        "UPDATE projects SET budget_cap_cents = ?, auto_pay_limit_cents = ?, pass_threshold = ? WHERE id = ?",
-      )
-      .run(next.budgetCapCents, next.autoPayLimitCents, next.passThreshold, project.id);
-    insertEvent(null, "client", "policy_updated", JSON.stringify(next));
+    await updateProjectPolicy(project.id, next);
+    await insertEvent(null, "client", "policy_updated", JSON.stringify(next));
   }
 
   async function resetDemoFlow(): Promise<void> {
     const failures: string[] = [];
-    for (const milestone of getState().milestones) {
+    for (const milestone of (await getState()).milestones) {
       if (LIVE_VOID_STATES.has(milestone.state) && milestone.paypalAuthorizationId) {
         try {
           await paypal.voidAuthorization(milestone.paypalAuthorizationId);
@@ -631,8 +627,8 @@ export function createWorkflow(deps: Partial<WorkflowDeps> = {}) {
         }
       }
     }
-    resetDemo();
-    insertEvent(
+    await resetDemo();
+    await insertEvent(
       null,
       "system",
       "demo_reset",

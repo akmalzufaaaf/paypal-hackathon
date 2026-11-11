@@ -16,7 +16,7 @@ export async function POST(
     const milestoneId = parseMilestoneId((await params).id);
     await readOptionalJsonBody(req);
     const { action } = await rerunPolicy(milestoneId);
-    return okResponse({ action });
+    return await okResponse({ action });
   } catch (err) {
     return errorResponse(err);
   }

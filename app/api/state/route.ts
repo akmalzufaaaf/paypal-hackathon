@@ -6,7 +6,7 @@ import { getState } from "@/lib/repo";
 export async function GET() {
   try {
     await requestTime();
-    return NextResponse.json(getState());
+    return NextResponse.json(await getState());
   } catch (err) {
     return errorResponse(err);
   }
