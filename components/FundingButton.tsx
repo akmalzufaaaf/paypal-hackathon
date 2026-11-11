@@ -40,7 +40,12 @@ export default function FundingButton({
   onError,
   onPendingChange,
 }: FundingButtonProps) {
-  const clientId = process.env.NEXT_PUBLIC_PAYPAL_CLIENT_ID;
+  // Build-time value when present (local dev / Render); otherwise fetched
+  // from /api/config at runtime so hosts whose env only exists at runtime
+  // (Docker, Hugging Face Spaces) still get the public Client ID.
+  const [clientId, setClientId] = useState<string | null | undefined>(
+    () => process.env.NEXT_PUBLIC_PAYPAL_CLIENT_ID?.trim() || undefined,
+  );
   const [error, setError] = useState<string | null>(null);
   const [pending, setPending] = useState(false);
   const containerRef = useRef<HTMLDivElement | null>(null);
@@ -56,6 +61,27 @@ export default function FundingButton({
     onPendingChangeRef.current = onPendingChange;
     lockedRef.current = locked;
   }, [onState, onError, onPendingChange, locked]);
+
+  useEffect(() => {
+    if (clientId !== undefined) return;
+    let cancelled = false;
+    fetch("/api/config")
+      .then((res) => res.json() as Promise<{ paypalClientId?: unknown }>)
+      .then((data) => {
+        if (cancelled) return;
+        setClientId(
+          typeof data.paypalClientId === "string" && data.paypalClientId
+            ? data.paypalClientId
+            : null,
+        );
+      })
+      .catch(() => {
+        if (!cancelled) setClientId(null);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [clientId]);
 
   useEffect(() => {
     if (!clientId || role !== "client" || milestone.state !== "DRAFT") {
@@ -153,6 +179,14 @@ export default function FundingButton({
 
   if (milestone.state !== "DRAFT") return null;
 
+  if (clientId === undefined) {
+    return (
+      <div className="funding-box">
+        <p className="muted">Loading PayPal…</p>
+      </div>
+    );
+  }
+
   if (!clientId) {
     return (
       <div className="funding-box">
@@ -160,8 +194,8 @@ export default function FundingButton({
           Fund milestone
         </button>
         <p className="hint">
-          PayPal is not configured — set NEXT_PUBLIC_PAYPAL_CLIENT_ID to enable
-          funding.
+          PayPal is not configured — set PAYPAL_CLIENT_ID (server env) to
+          enable funding.
         </p>
         {error ? (
           <p className="alert" role="alert">

@@ -1,3 +1,13 @@
+---
+title: Rilis — Freelancer Money Agent
+emoji: 🛡️
+colorFrom: blue
+colorTo: green
+sdk: docker
+app_port: 7860
+pinned: false
+---
+
 # Rilis — Freelancer Money Agent
 
 Rilis removes the trust deadlock between a freelancer and an overseas client.
