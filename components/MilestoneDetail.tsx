@@ -177,7 +177,10 @@ export default function MilestoneDetail({
         />
       ) : null}
 
-      <VerdictPanel verification={verification} />
+      <VerdictPanel
+        verification={verification}
+        passThreshold={project.passThreshold}
+      />
 
       {showActions ? (
         <div className="action-row">

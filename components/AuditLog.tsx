@@ -75,7 +75,7 @@ export default function AuditLog({ events, ledger, milestones }: AuditLogProps) 
       {events.length === 0 ? (
         <p className="muted small">No events yet.</p>
       ) : (
-        <ol className="event-list">
+        <ol className="event-list timeline">
           {events.map((event) => (
             <li key={event.id} className="event-entry">
               <div className="event-head">
